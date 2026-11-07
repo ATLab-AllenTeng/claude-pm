@@ -1,47 +1,113 @@
-# 收件匣（claude-inbox）
+<div align="center">
 
-給 Claude Code 用的收件匣。agent 要你做決定時，不在對話裡等，而是把題目放進一個網頁。你有空時一次看完、一次回答，答案會自動回到 agent 手上。
+# 📥 收件匣
 
-另外附一份「總PM」操作說明：一個常駐對話帶好幾條工作線，你只看收件匣。
+### 讓你的 agent 別再停在那邊等你回一句「好」
 
-## 你會得到什麼
+Claude Code 專用的「決定信箱」：agent 要你拍板的事，統一放進一個網頁。<br>
+你有空時一次看完、一次回答，**答案自動回到 agent 手上**。
 
-| 東西 | 做什麼 |
+![license MIT](https://img.shields.io/badge/license-MIT-green) ![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-blue) ![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-d97757)
+
+<img src="docs/demo.gif" alt="示範：在收件匣網頁選答案、寫補充、送出，agent 立刻收到" width="760">
+
+</div>
+
+---
+
+## 你是不是也遇過這些事？
+
+- 讓 agent 跑起來就去吃飯，回來發現它 20 分鐘前就停在「要用 A 還是 B？」
+- 同時開了三個對話，每一個都在問你問題，你得一個一個切過去回
+- 答案打在對話裡，換個對話它就不知道，隔天又得再解釋一次
+
+**收件匣把「問你」這件事從對話裡拿出來。** agent 繼續做不需要你的部分，要你決定的事排隊放好，你方便的時候再處理。
+
+<div align="center">
+<img src="docs/flow.png" alt="流程：agent 出題，你在網頁回答，答案自動回到 agent" width="900">
+</div>
+
+## 長這樣
+
+<div align="center">
+<img src="docs/shot-answering.png" alt="收件匣網頁：題目、選項、推薦標記與補充欄" width="760">
+</div>
+
+每一題都附上**來源**（哪個專案問的）、**期限**、**推薦選項**和一個補充欄。選好、寫幾句，按「送出全部已答」就好。
+
+<table>
+<tr>
+<td width="62%" valign="top">
+<img src="docs/shot-received.png" alt="送出後，每題顯示「agent 已收到」">
+<p align="center"><sub>送出後看得到每題有沒有被 agent 收走</sub></p>
+</td>
+<td width="38%" valign="top">
+<img src="docs/shot-mobile.png" alt="手機版畫面">
+<p align="center"><sub>手機版（寬度 390 的實際畫面）</sub></p>
+</td>
+</tr>
+</table>
+
+## 為什麼好用
+
+| | |
 |---|---|
-| `inbox` 指令 | agent 用 `inbox ask` 出題；`inbox take`／`inbox wait` 取回答 |
-| 網頁 | 看題、選選項、寫補充、「這題先送」或「送出全部已答」 |
-| hook | 你回答後，agent 下一輪開始時自動收到答案，不用常駐轉送程式 |
-| `inbox` 技能 | 教 agent 什麼時候出題、怎麼出題、出完之後做什麼 |
-| `pm` 技能 | 總PM 操作說明，輸入 `/pm` 啟用 |
+| **題目集中** | 所有對話的問題在同一個網頁，來源、期限、推薦選項一眼看完，不用切視窗 |
+| **一次回完** | 逐題先送，或一次「送出全部已答」。草稿會自動保存，重新整理也不會掉 |
+| **答案自動回去** | 用 Claude Code 的 hook：你送出後，agent 下一輪開始時答案就已經在它的上下文裡，不用你再貼 |
+| **不叫 AI、不上雲** | 只用 Python 標準庫。題目就是 agent 寫的那一份，資料全部放在你自己的電腦 |
+| **預設安全** | 只開在本機，所有操作都要 token；題目文字一律當純文字顯示，不會被執行 |
+| **手機也能回** | 把位址改成你的 Tailscale 或內網位址，就能在手機上回答（見下方進階說明） |
 
-需要 Python 3.9 以上和 Claude Code，支援 macOS、Linux 與 WSL（原生 Windows 不支援）。沒有其他依賴，也不叫任何 AI；題目的文字就是 agent 寫的那一份。
+## 30 秒開始
 
-## 安裝
-
-在 Claude Code 裡：
+在 Claude Code 裡輸入：
 
 ```
-/plugin marketplace add <這個 repo 的位置>
+/plugin marketplace add chenjackle45/claude-inbox
 /plugin install inbox@claude-inbox
 ```
 
-本機試用不安裝：`claude --plugin-dir <這個資料夾>`。
+裝好後重開一次 Claude Code，然後對 agent 說：
 
-## 使用
+> 有要我決定的事，就放進收件匣。
 
-1. 對 agent 說「有要我決定的事就放收件匣」，或在專案的 `CLAUDE.md` 寫一句。
-2. agent 出題後會印出網址，預設是 `http://localhost:7799/?t=<token>`。要用印出來的完整網址開；之後忘了網址就跑 `inbox url`。
-3. 你在網頁上回答。agent 在下一輪（或它背景跑的 `inbox wait` 結束時）收到答案。
+就這樣。agent 會自己用 `inbox ask` 出題，並印出網頁網址。想長期生效，把上面那句寫進專案的 `CLAUDE.md`。
 
-手動出題看看。`inbox` 指令是給 agent 的 Bash 用的；你自己在終端機試的話，改用 `python3 <plugin 資料夾>/inbox/inbox.py`，後面參數一樣：
+**你送出之後，agent 看到的是這樣：**
+
+```
+收件匣：使用者回覆了 2 則。
+
+【q-20261107-144835-480d】登入頁要不要保留帳密登入？
+使用者選：A 保留帳密登入，兩種並存
+補充：先留著，下個月再看有沒有人還在用。
+
+照回覆繼續做；這件處理完可跑 inbox close <題號> 把它收起來。
+```
+
+想自己出一題試試看：
 
 ```bash
 inbox ask --title "要不要上新版？" --option "A=上" --option "B=不上" --recommend A
-inbox list          # 看題目與狀態
-inbox close <題號>  # 處理完收起來
 ```
 
-## 從手機看
+> `inbox` 指令是給 agent 的 Bash 用的。你自己在終端機試的話，改用 `python3 <plugin 資料夾>/inbox/inbox.py`，後面的參數一樣。
+
+## 🎁 附贈：總PM 模式
+
+一個常駐的對話帶好幾條工作線、自己不寫程式，只負責派工、裁決、追進度，而你**只看收件匣**。輸入 `/inbox:pm` 就能看到完整的操作說明，包含狀態檔怎麼寫、什麼事該出題給你、哪些事一定要先問你。
+
+## 覺得有用？
+
+按個 ⭐ **Star** 讓更多人看到，也歡迎開 Issue 告訴我哪裡卡住、哪裡想要更好。
+
+---
+
+<details>
+<summary><b>進階：從手機看、資料放哪、答案送給哪個對話</b></summary>
+
+### 從手機看
 
 預設只開在本機。要用手機看，編輯 `~/.claude-inbox/config.json`：
 
@@ -49,9 +115,9 @@ inbox close <題號>  # 處理完收起來
 { "host": "你的 Tailscale 或內網位址", "port": 7799 }
 ```
 
-位址只支援 IPv4。token 不分本機或遠端，第一次使用時自動產生，寫進同一個檔（權限 600，資料夾權限 700）。改位址或換 token 後都要重新啟動服務：`inbox stop` 再 `inbox start`。執行中的服務不會自動套用新設定，舊 token 在它重啟前仍然有效。
+位址只支援 IPv4。token 不分本機或遠端，第一次使用時自動產生，寫進同一個檔（檔案權限 600，資料夾權限 700）。改位址或換 token 後都要重新啟動服務：`inbox stop` 再 `inbox start`。執行中的服務不會自動套用新設定，舊 token 在它重啟前仍然有效。用 `inbox url` 可以印出帶 token 的完整網址。
 
-## 資料放哪
+### 資料放哪
 
 `~/.claude-inbox/`（可用環境變數 `CLAUDE_INBOX_HOME` 改）：
 
@@ -63,22 +129,28 @@ inbox close <題號>  # 處理完收起來
 
 題目與答案都是明文，不要放密碼或金鑰。
 
-## 答案送到哪個對話
+### 答案送給哪個對話
 
-答案送回出題的那個對話。那個對話 30 分鐘內沒來拿，同一個專案（同一個 git 根目錄）裡的其他對話也拿得到。每則答案只送出一次。
+答案送回出題的那個對話，不管它現在在哪個資料夾。那個對話 30 分鐘內沒來拿，同一個專案（同一個 git 根目錄）裡的其他對話也拿得到。每則答案只送出一次。
 
-## 安全
+### 安全
 
 - 只收 `Host` 與 `Origin` 符合的請求，擋掉別的網頁偷打你的本機服務。
 - 所有 API 都要 token，本機也一樣：答案會被放進 agent 的上下文，不能讓同一台機器上的其他程式隨便寫入。
-- 頁面把題目文字當純文字顯示，網址才變成連結。
+- 頁面把題目文字當純文字顯示，只有網址會變成連結。
 - 回答只在你的機器上流動，沒有任何外送。
 
-## 開發
+### 需求
+
+Python 3.9 以上、Claude Code。支援 macOS、Linux 與 WSL（原生 Windows 不支援）。沒有其他依賴。
+
+### 開發
 
 ```bash
 python3 -m unittest discover tests
 ```
+
+</details>
 
 ## 授權
 
