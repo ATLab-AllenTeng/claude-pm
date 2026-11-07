@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>收件匣</title>
+    <style>
+      :root {
+        --bg-0: #101215;
+        --bg-1: #16191d;
+        --bg-2: #1d2126;
+        --bg-3: #252a31;
+        --line: #2a3037;
+        --line-2: #3a424c;
+        --fg: #eceef1;
+        --fg-2: #bcc3cb;
+        --fg-3: #959ea8;
+        --amber: #f2b33d;
+        --teal: #3fd3be;
+        --red: #ff6f62;
+        --ink: #121417;
+        --sans:
+          "PingFang TC", "SF Pro Text", -apple-system, ui-sans-serif,
+          "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+        --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        --r: 10px;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg-0);
+        color: var(--fg);
+        font: 15px/1.7 var(--sans);
+      }
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 5;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 14px 20px;
+        background: var(--bg-1);
+        border-bottom: 1px solid var(--line);
+      }
+      header h1 {
+        margin: 0;
+        font-size: 18px;
+      }
+      .count {
+        color: var(--fg-2);
+        font-size: 14px;
+      }
+      .count b {
+        color: var(--amber);
+      }
+      .updated {
+        margin-left: auto;
+        color: var(--fg-3);
+        font-size: 13px;
+      }
+      main {
+        max-width: 860px;
+        margin: 0 auto;
+        padding: 20px 16px 120px;
+      }
+      h2 {
+        font-size: 14px;
+        color: var(--fg-3);
+        font-weight: 600;
+        margin: 28px 0 10px;
+      }
+      .empty {
+        color: var(--fg-3);
+        padding: 28px;
+        text-align: center;
+        border: 1px dashed var(--line-2);
+        border-radius: var(--r);
+      }
+      .card {
+        background: var(--bg-1);
+        border: 1px solid var(--line);
+        border-radius: var(--r);
+        padding: 16px 18px;
+        margin-bottom: 14px;
+      }
+      .card.done {
+        opacity: 0.8;
+      }
+      .meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        font-size: 13px;
+        color: var(--fg-3);
+      }
+      .tag {
+        padding: 1px 8px;
+        border-radius: 99px;
+        background: var(--bg-3);
+        color: var(--fg-2);
+      }
+      .tag.info {
+        color: var(--teal);
+      }
+      .tag.due {
+        color: var(--amber);
+      }
+      .card h3 {
+        margin: 6px 0 8px;
+        font-size: 17px;
+        line-height: 1.5;
+      }
+      .body {
+        color: var(--fg-2);
+        max-width: 72ch;
+      }
+      .body p {
+        margin: 0 0 8px;
+      }
+      .body code {
+        font-family: var(--mono);
+        font-size: 13px;
+        background: var(--bg-3);
+        padding: 1px 5px;
+        border-radius: 4px;
+      }
+      .body a {
+        color: var(--teal);
+      }
+      .opts {
+        display: grid;
+        gap: 8px;
+        margin: 12px 0;
+      }
+      .opt {
+        position: relative;
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+        padding: 10px 12px;
+        border: 1px solid var(--line-2);
+        border-radius: 8px;
+        cursor: pointer;
+        background: var(--bg-2);
+      }
+      .opt input {
+        position: absolute;
+        opacity: 0;
+      }
+      .opt .key {
+        flex: none;
+        width: 26px;
+        height: 26px;
+        border-radius: 6px;
+        display: grid;
+        place-items: center;
+        background: var(--bg-3);
+        font-weight: 700;
+      }
+      .opt:has(input:checked) {
+        border-color: var(--amber);
+      }
+      .opt:has(input:checked) .key {
+        background: var(--amber);
+        color: var(--ink);
+      }
+      .opt:has(input:focus-visible) {
+        outline: 3px solid var(--teal);
+        outline-offset: 2px;
+      }
+      .rec {
+        color: var(--amber);
+        font-size: 13px;
+        margin-left: 4px;
+      }
+      textarea {
+        width: 100%;
+        min-height: 44px;
+        resize: vertical;
+        padding: 10px 12px;
+        border-radius: 8px;
+        border: 1px solid var(--line-2);
+        background: var(--bg-2);
+        color: var(--fg);
+        font: inherit;
+      }
+      textarea:focus {
+        outline: 2px solid var(--teal);
+      }
+      .row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        margin-top: 10px;
+        flex-wrap: wrap;
+      }
+      button {
+        font: inherit;
+        border-radius: 8px;
+        border: 1px solid var(--line-2);
+        background: var(--bg-3);
+        color: var(--fg);
+        padding: 7px 14px;
+        cursor: pointer;
+      }
+      button.primary {
+        background: var(--amber);
+        color: var(--ink);
+        border-color: var(--amber);
+        font-weight: 700;
+      }
+      button:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+      .hint {
+        color: var(--fg-3);
+        font-size: 13px;
+      }
+      .err {
+        color: var(--red);
+        font-size: 13px;
+      }
+      .answer {
+        margin-top: 10px;
+        padding: 10px 12px;
+        border-left: 3px solid var(--teal);
+        background: var(--bg-2);
+        border-radius: 0 8px 8px 0;
+        font-size: 14px;
+      }
+      .answer .who {
+        color: var(--fg-3);
+        font-size: 12px;
+      }
+      footer {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        justify-content: center;
+        padding: 12px 16px;
+        background: var(--bg-1);
+        border-top: 1px solid var(--line);
+      }
+      details.history summary {
+        cursor: pointer;
+        color: var(--fg-3);
+        font-size: 14px;
+        margin: 28px 0 10px;
+      }
+      @media (max-width: 640px) {
+        header {
+          flex-wrap: wrap;
+        }
+        .updated {
+          margin-left: 0;
+          width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>收件匣</h1>
+      <span class="count" id="count"></span>
+      <span class="updated" id="updated">載入中…</span>
+    </header>
+    <main id="main"></main>
+    <footer>
+      <span class="hint" id="ready"></span>
+      <button class="primary" id="send-all" disabled>送出全部已答</button>
+      <span class="err" id="err" role="alert"></span>
+    </footer>
+    <script>
+      const params = new URLSearchParams(location.search);
+      if (params.get("t")) {
+        sessionStorage.setItem("inbox-token", params.get("t"));
+        history.replaceState(null, "", location.pathname);
+      }
+      const TOKEN = sessionStorage.getItem("inbox-token") || "";
+      const HEADERS = {
+        "Content-Type": "application/json",
+        "X-Inbox-Token": TOKEN,
+      };
+      let STATE = { questions: [] };
+      let lastJson = "";
+      let dirtyWhileEditing = false;
+
+      const $ = (id) => document.getElementById(id);
+      const draftKey = (id) => "inbox-draft-" + id;
+      const getDraft = (id) =>
+        JSON.parse(localStorage.getItem(draftKey(id)) || "{}");
+      const setDraft = (id, d) =>
+        localStorage.setItem(draftKey(id), JSON.stringify(d));
+
+      function esc(s) {
+        return String(s).replace(
+          /[&<>"']/g,
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[c],
+        );
+      }
+
+      function renderBody(text) {
+        return String(text || "")
+          .trim()
+          .split(/\n{2,}/)
+          .filter(Boolean)
+          .map((para) => {
+            let h = esc(para);
+            h = h.replace(/`([^`]+)`/g, "<code>$1</code>");
+            h = h.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+            h = h.replace(
+              /https?:\/\/[^\s<]+/g,
+              (u) =>
+                '<a href="' +
+                u +
+                '" target="_blank" rel="noopener noreferrer">' +
+                u +
+                "</a>",
+            );
+            return "<p>" + h.replace(/\n/g, "<br>") + "</p>";
+          })
+          .join("");
+      }
+
+      function when(iso) {
+        const d = new Date(iso);
+        return isNaN(d)
+          ? ""
+          : d.getMonth() +
+              1 +
+              "/" +
+              d.getDate() +
+              " " +
+              String(d.getHours()).padStart(2, "0") +
+              ":" +
+              String(d.getMinutes()).padStart(2, "0");
+      }
+
+      function isOpen(q) {
+        return !q.closed && q.answers.length === 0;
+      }
+
+      function ready(q) {
+        const d = getDraft(q.id);
+        return q.kind === "info"
+          ? true
+          : Boolean(d.choice || (d.text || "").trim());
+      }
+
+      function cardHtml(q) {
+        const d = getDraft(q.id);
+        const open = isOpen(q);
+        const tags = [
+          '<span class="tag">' + esc(q.from) + "</span>",
+          "<span>" + when(q.created) + "</span>",
+        ];
+        if (q.kind === "info") tags.push('<span class="tag info">知會</span>');
+        if (q.deadline)
+          tags.push(
+            '<span class="tag due">期限：' + esc(q.deadline) + "</span>",
+          );
+        let html =
+          '<article class="card' +
+          (open ? "" : " done") +
+          '" data-id="' +
+          esc(q.id) +
+          '">' +
+          '<div class="meta">' +
+          tags.join("") +
+          "</div><h3>" +
+          esc(q.title) +
+          "</h3>" +
+          '<div class="body">' +
+          renderBody(q.body) +
+          "</div>";
+        if (open) {
+          if (q.options.length) {
+            html +=
+              '<div class="opts" role="radiogroup" aria-label="' +
+              esc(q.title) +
+              '">' +
+              q.options
+                .map(
+                  (o) =>
+                    '<label class="opt"><input type="radio" name="c-' +
+                    esc(q.id) +
+                    '" value="' +
+                    esc(o.key) +
+                    '"' +
+                    (d.choice === o.key ? " checked" : "") +
+                    '><span class="key">' +
+                    esc(o.key) +
+                    "</span><span>" +
+                    esc(o.label) +
+                    (o.recommended ? '<span class="rec">（推薦）</span>' : "") +
+                    "</span></label>",
+                )
+                .join("") +
+              "</div>";
+          }
+          html +=
+            '<textarea data-text placeholder="' +
+            (q.kind === "info"
+              ? "有意見可以寫在這裡（選填）"
+              : "補充說明（選填；沒有選項的題目直接寫答案）") +
+            '">' +
+            esc(d.text || "") +
+            "</textarea>" +
+            '<div class="row"><button data-send>' +
+            (q.kind === "info" ? "我知道了" : "這題先送") +
+            "</button></div>";
+        }
+        q.answers.forEach((a) => {
+          const pick =
+            a.choice === "ack"
+              ? "我知道了"
+              : a.choice
+                ? a.choice + " " + a.choice_label
+                : "";
+          html +=
+            '<div class="answer"><div class="who">你在 ' +
+            when(a.at) +
+            " 回覆 · " +
+            (a.delivered ? "agent 已收到" : "等 agent 來拿") +
+            "</div>" +
+            (pick ? "<div>" + esc(pick) + "</div>" : "") +
+            (a.text ? "<div>" + esc(a.text) + "</div>" : "") +
+            "</div>";
+        });
+        return html + "</article>";
+      }
+
+      function render() {
+        const open = STATE.questions.filter(isOpen).reverse();
+        const answered = STATE.questions
+          .filter((q) => !q.closed && q.answers.length)
+          .reverse();
+        const closed = STATE.questions.filter((q) => q.closed).reverse();
+        $("count").innerHTML = "待你回 <b>" + open.length + "</b> 題";
+        let html =
+          "<h2>待你回答</h2>" +
+          (open.length
+            ? open.map(cardHtml).join("")
+            : '<div class="empty">目前沒有要你回答的事。</div>');
+        if (answered.length)
+          html +=
+            "<h2>已回答、等 agent 處理</h2>" + answered.map(cardHtml).join("");
+        if (closed.length)
+          html +=
+            '<details class="history"><summary>已收起 ' +
+            closed.length +
+            " 題</summary>" +
+            closed.map(cardHtml).join("") +
+            "</details>";
+        $("main").innerHTML = html;
+        updateFooter();
+      }
+
+      function updateFooter() {
+        const n = STATE.questions.filter(
+          (q) => isOpen(q) && q.kind !== "info" && ready(q),
+        ).length;
+        $("ready").textContent = n ? "已答 " + n + " 題" : "";
+        $("send-all").disabled = n === 0;
+      }
+
+      async function load() {
+        try {
+          const res = await fetch("/api/state", {
+            headers: HEADERS,
+            cache: "no-store",
+          });
+          if (!res.ok)
+            throw new Error(
+              res.status === 401
+                ? "網址少了 token，請用 inbox url 印出的完整網址"
+                : "讀取失敗（" + res.status + "）",
+            );
+          const text = await res.text();
+          $("updated").textContent =
+            "更新於 " +
+            new Date().toLocaleTimeString("zh-TW", { hour12: false });
+          $("err").textContent = "";
+          if (text === lastJson) return;
+          lastJson = text;
+          STATE = JSON.parse(text);
+          if (
+            document.activeElement &&
+            document.activeElement.matches("textarea")
+          ) {
+            dirtyWhileEditing = true;
+            return;
+          }
+          render();
+        } catch (e) {
+          $("updated").textContent = "連不上服務";
+          $("err").textContent = e.message;
+        }
+      }
+
+      async function send(ids) {
+        const answers = ids.map((id) => {
+          const d = getDraft(id);
+          const q = STATE.questions.find((x) => x.id === id);
+          return {
+            question_id: id,
+            choice: q.kind === "info" ? "ack" : d.choice || "",
+            text: d.text || "",
+          };
+        });
+        $("err").textContent = "";
+        const res = await fetch("/api/answer", {
+          method: "POST",
+          headers: HEADERS,
+          body: JSON.stringify({ answers }),
+        });
+        if (!res.ok) {
+          $("err").textContent = "送出失敗：" + (await res.text());
+          return;
+        }
+        ids.forEach((id) => localStorage.removeItem(draftKey(id)));
+        lastJson = "";
+        await load();
+      }
+
+      document.addEventListener("change", (e) => {
+        const card = e.target.closest(".card");
+        if (!card || e.target.type !== "radio") return;
+        const d = getDraft(card.dataset.id);
+        d.choice = e.target.value;
+        setDraft(card.dataset.id, d);
+        updateFooter();
+      });
+      document.addEventListener("input", (e) => {
+        const card = e.target.closest(".card");
+        if (!card || !e.target.matches("[data-text]")) return;
+        const d = getDraft(card.dataset.id);
+        d.text = e.target.value;
+        setDraft(card.dataset.id, d);
+        updateFooter();
+      });
+      document.addEventListener("focusout", () => {
+        setTimeout(() => {
+          if (
+            dirtyWhileEditing &&
+            !(
+              document.activeElement &&
+              document.activeElement.matches("textarea")
+            )
+          ) {
+            dirtyWhileEditing = false;
+            render();
+          }
+        }, 0);
+      });
+      document.addEventListener("click", (e) => {
+        const btn = e.target.closest("[data-send]");
+        if (btn) {
+          const id = btn.closest(".card").dataset.id;
+          const q = STATE.questions.find((x) => x.id === id);
+          if (q.kind !== "info" && !ready(q)) {
+            $("err").textContent = "這題還沒選，也沒有寫補充。";
+            return;
+          }
+          send([id]);
+        }
+      });
+      $("send-all").addEventListener("click", () => {
+        send(
+          STATE.questions
+            .filter((q) => isOpen(q) && q.kind !== "info" && ready(q))
+            .map((q) => q.id),
+        );
+      });
+
+      load();
+      setInterval(load, 5000);
+    </script>
+  </body>
+</html>
