@@ -114,6 +114,30 @@ inbox ask --title "要不要上新版？" --option "A=上" --option "B=不上" -
 
 這是給還沒有自己流程的人用的預設做法。你已經有自己的總PM、狀態檔或審查流程時，agent 會沿用你的，只補收件匣那一塊，不會另建一套。
 
+## 不用 Claude Code 也能用（Codex 等其他 agent）
+
+收件匣的核心是一支 Python 指令加一個網頁，不綁 Claude Code。plugin 只是 Claude Code 專用的打包。其他 agent 能在 shell 裡直接跑同一支指令：
+
+```bash
+git clone https://github.com/chenjackle45/claude-inbox
+python3 claude-inbox/inbox/inbox.py ask --title "要不要上新版？" --option "A=上" --option "B=不上"
+python3 claude-inbox/inbox/inbox.py wait --timeout 1800   # 有回覆時印出答案並結束
+```
+
+其他 agent 沒有 Claude Code 的 hook，答案不會自動出現在上下文，要靠它自己跑 `wait` 或 `take` 去拿。把下面這段貼進它的規則檔（例如 `AGENTS.md`），路徑換成你放的位置：
+
+```markdown
+## 收件匣
+需要問我的事，用下面的指令放進收件匣，不要在對話裡停下來等：
+python3 /path/to/claude-inbox/inbox/inbox.py ask --title "..." --option "A=..." --option "B=..."
+先做不受這題影響的工作。一定要等答案時，在背景跑 `... inbox.py wait --timeout 1800`。
+處理完一題後跑 `... inbox.py close <題號>`。
+```
+
+兩個限制：
+- 程式靠環境變數 `CLAUDE_CODE_SESSION_ID` 認出題的對話。其他 agent 沒有它，題目會變成匿名，同一個專案資料夾裡的任何 agent 都拿得到答案。兩個 agent 同時在同一個專案出題時，可能拿到對方的答案。
+- 這個用法還沒有拿 Codex 等實際跑過，是依程式行為寫的。
+
 ## 覺得有用？
 
 按個 ⭐ **Star** 讓更多人看到，也歡迎開 Issue 告訴我哪裡卡住、哪裡想要更好。
@@ -158,7 +182,7 @@ inbox ask --title "要不要上新版？" --option "A=上" --option "B=不上" -
 
 ### 需求
 
-Python 3.9 以上、Claude Code。支援 macOS、Linux 與 WSL（原生 Windows 不支援）。沒有其他依賴。
+Python 3.9 以上。答案自動送回 agent 需要 Claude Code；其他 agent 的用法見上方。支援 macOS、Linux 與 WSL（原生 Windows 不支援）。沒有其他依賴。
 
 ### 開發
 
