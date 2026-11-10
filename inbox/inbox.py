@@ -800,13 +800,23 @@ def cmd_list(args):
 
 def is_inbox_server(pid):
     """這個 PID 是不是收件匣服務。PID 檔可能是舊的（例如重開機後號碼被別的程式拿去用）。"""
+    words = command_line_of(pid).replace('"', ' ').split()
+    return 'serve' in words and any(w.endswith('inbox.py') for w in words)
+
+
+def command_line_of(pid):
+    """那個 PID 的完整命令列；查不到（行程不在了、沒權限、工具不存在）回空字串。"""
+    if IS_WINDOWS:  # Windows 沒有 ps；tasklist 只給程式名，要命令列得問 CIM
+        query = "(Get-CimInstance Win32_Process -Filter 'ProcessId=%d').CommandLine" % int(pid)
+        command = ['powershell', '-NoProfile', '-NonInteractive', '-Command', query]
+    else:
+        command = ['ps', '-p', str(int(pid)), '-o', 'command=']
     try:
-        out = subprocess.run(['ps', '-p', str(pid), '-o', 'command='],
-                             capture_output=True, text=True, timeout=5)
+        out = subprocess.run(command, capture_output=True, timeout=20, stdin=subprocess.DEVNULL,
+                             encoding='utf-8', errors='replace')
     except (OSError, subprocess.SubprocessError):
-        return False
-    words = out.stdout.split()
-    return out.returncode == 0 and 'serve' in words and any(w.endswith('inbox.py') for w in words)
+        return ''
+    return out.stdout if out.returncode == 0 else ''
 
 
 def cmd_prune(args):
@@ -844,10 +854,10 @@ def cmd_stop(args):
             print('已停止')
         else:
             print('服務本來就沒在跑')  # 不是我們的服務就不碰它
-    except (ProcessLookupError, ValueError):
-        print('服務本來就沒在跑')
     except PermissionError:
         print('沒有權限停止 PID 檔記的那個程式，沒動它')
+    except (OSError, ValueError):  # 行程剛好不在了：POSIX 是 ProcessLookupError，Windows 是一般的 OSError
+        print('服務本來就沒在跑')
     pidfile.unlink(missing_ok=True)
 
 

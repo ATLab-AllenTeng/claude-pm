@@ -615,6 +615,20 @@ class Server(Base):
         self.assertIsNone(bystander.poll())  # 沒被誤殺
         self.assertFalse(pid_file.exists())
 
+    def test_command_line_check_handles_quotes_spaces_and_missing_process(self):
+        cases = {
+            '/usr/bin/python3 /home/me/plugins/inbox/inbox.py serve': True,
+            '"C:\\Program Files\\Python312\\python.exe" "C:\\Users\\me\\my plugins\\inbox\\inbox.py" serve': True,
+            '/usr/bin/python3 /home/me/plugins/inbox/inbox.py wait --timeout 1800': False,  # 不是服務
+            'sleep 30': False,
+            '': False,  # 查不到
+        }
+        for line, expected in cases.items():
+            with mock.patch.object(inbox, 'command_line_of', return_value=line):
+                self.assertEqual(inbox.is_inbox_server(1234), expected, line)
+        self.assertEqual(inbox.command_line_of(2 ** 22 + 12345), '')  # 不存在的 PID
+        self.assertIn('inbox', inbox.command_line_of(os.getpid()) + 'inbox')  # 查自己不會丟例外
+
     def test_stop_ends_real_server_and_server_removes_its_pid_file(self):
         port = free_port()
         inbox.home()
