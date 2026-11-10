@@ -64,9 +64,11 @@ Claude Code 專用的「決定信箱」：agent 要你拍板的事，統一放�
 在 Claude Code 裡輸入：
 
 ```
-/plugin marketplace add chenjackle45/claude-inbox
-/plugin install inbox@claude-inbox
+/plugin marketplace add ATLab-AllenTeng/claude-pm
+/plugin install inbox@claude-pm
 ```
+
+> 這是 [chenjackle45/claude-inbox](https://github.com/chenjackle45/claude-inbox) 的分支版本，marketplace 名稱是 `claude-pm`，可以和原版同時安裝。
 
 裝好後重開一次 Claude Code，然後對 agent 說：
 
@@ -119,9 +121,9 @@ inbox ask --title "要不要上新版？" --option "A=上" --option "B=不上" -
 收件匣的核心是一支 Python 指令加一個網頁，不綁 Claude Code。plugin 只是 Claude Code 專用的打包。其他 agent 能在 shell 裡直接跑同一支指令：
 
 ```bash
-git clone https://github.com/chenjackle45/claude-inbox
-python3 claude-inbox/inbox/inbox.py ask --title "要不要上新版？" --option "A=上" --option "B=不上"
-python3 claude-inbox/inbox/inbox.py wait --timeout 1800   # 有回覆時印出答案並結束
+git clone https://github.com/ATLab-AllenTeng/claude-pm
+python3 claude-pm/inbox/inbox.py ask --title "要不要上新版？" --option "A=上" --option "B=不上"
+python3 claude-pm/inbox/inbox.py wait --timeout 1800   # 有回覆時印出答案並結束
 ```
 
 其他 agent 沒有 Claude Code 的 hook，答案不會自動出現在上下文，要靠它自己跑 `wait` 或 `take` 去拿。把下面這段貼進它的規則檔（例如 `AGENTS.md`），路徑換成你放的位置：
@@ -129,7 +131,7 @@ python3 claude-inbox/inbox/inbox.py wait --timeout 1800   # 有回覆時印出�
 ```markdown
 ## 收件匣
 需要問我的事，用下面的指令放進收件匣，不要在對話裡停下來等：
-python3 /path/to/claude-inbox/inbox/inbox.py ask --title "..." --option "A=..." --option "B=..."
+python3 /path/to/claude-pm/inbox/inbox.py ask --title "..." --option "A=..." --option "B=..."
 先做不受這題影響的工作。一定要等答案時，在背景跑 `... inbox.py wait --timeout 1800`。
 處理完一題後跑 `... inbox.py close <題號>`。
 ```

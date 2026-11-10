@@ -1,7 +1,7 @@
 {
-  "name": "claude-inbox",
+  "name": "claude-pm",
   "description": "Claude Code 收件匣（繁體中文）",
-  "owner": { "name": "claude-inbox" },
+  "owner": { "name": "ATLab-AllenTeng" },
   "plugins": [
     { "name": "inbox", "source": "./", "description": "收件匣與總PM 操作說明" }
   ]
