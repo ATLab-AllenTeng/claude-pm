@@ -5,6 +5,7 @@
 """
 import argparse
 import fcntl
+import hashlib
 import ipaddress
 import json
 import os
@@ -13,6 +14,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -24,7 +26,11 @@ PAGE = HERE / 'page.html'
 DEFAULT_PORT = 7799
 MAX_BODY = 64 * 1024
 MAX_TEXT = 4000
-ORPHAN_SECONDS = 30 * 60  # 提問的 session 30 分鐘沒來拿，同專案其他 session 可以拿
+IDLE_CHECK_SECONDS = 60
+KEEP_DAYS = 30  # 收起的題目留幾天（config 的 keep_days 可改，0 是不自動清）
+PRUNE_EVERY_SECONDS = 24 * 3600
+TAILSCALE_NET = ipaddress.ip_network('100.64.0.0/10')  # Tailscale 的位址範圍，連線本身有加密
+TAKEOVER_HOURS = 24  # 出題的對話沒說自己結束、但這麼久沒動靜，就當它不在了（config 的 takeover_hours 可改）
 
 
 # ---------- 路徑與設定 ----------
@@ -37,7 +43,8 @@ def home():
 
 
 def read_config(path):
-    config = {'host': '127.0.0.1', 'port': DEFAULT_PORT, 'token': ''}
+    config = {'host': '127.0.0.1', 'port': DEFAULT_PORT, 'token': '', 'idle_hours': 12,
+              'takeover_hours': TAKEOVER_HOURS, 'keep_days': KEEP_DAYS}
     if path.exists():
         config.update(json.loads(path.read_text(encoding='utf-8')))
     return config
@@ -63,6 +70,27 @@ def is_loopback(host):
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def exposure_warning(config):
+    """服務開在本機和 Tailscale 以外的位址時，回一段提醒；其他情況回空字串。"""
+    host = str(config.get('host', ''))
+    if is_loopback(host):
+        return ''
+    try:
+        if ipaddress.ip_address(host) in TAILSCALE_NET:
+            return ''
+    except ValueError:
+        pass
+    return ('注意：收件匣開在 %s，走的是沒加密的 HTTP。同一個網路上的人看得到網址裡的 token，'
+            '拿到 token 就能用你的名義回答，等於直接對 agent 下指令。'
+            '只在你信任的網路上這樣用，或改成 Tailscale 位址。' % host)
+
+
+def warn_exposure(config):
+    warning = exposure_warning(config)
+    if warning:
+        print(warning, file=sys.stderr)
 
 
 def write_json(path, data):
@@ -94,6 +122,73 @@ def base_url(config):
 
 def page_url(config):
     return base_url(config) + ('?t=' + config['token'] if config.get('token') else '')
+
+
+# ---------- session 的動靜 ----------
+
+def session_file(session_id):
+    folder = home() / 'sessions'
+    folder.mkdir(mode=0o700, exist_ok=True)
+    return folder / hashlib.sha256(session_id.encode('utf-8')).hexdigest()[:32]
+
+
+def touch_session(session_id):
+    """記下這個 session 剛剛還有動靜。不會把「已結束」改回來：背景殘留的 wait 也會走到這裡。"""
+    if not session_id:
+        return
+    now = time.time()
+    try:
+        path = session_file(session_id)
+        path.touch(mode=0o600)
+        os.utime(path, (now, now))
+    except OSError:
+        pass  # 記不下來不該擋住出題或拿回答
+
+
+def last_seen(session_id):
+    try:
+        return session_file(session_id).stat().st_mtime
+    except OSError:
+        return 0.0  # 沒記錄過（例如舊版出的題）
+
+
+def ended_file(session_id):
+    path = session_file(session_id)
+    return path.with_name(path.name + '.ended')
+
+
+def mark_ended(session_id):
+    """Claude Code 說這個 session 結束了（SessionEnd hook）：它的回答可以馬上交給同專案的其他對話。"""
+    if not session_id:
+        return
+    try:
+        ended_file(session_id).touch(mode=0o600)
+    except OSError:
+        pass
+
+
+def session_ended(session_id):
+    return bool(session_id) and ended_file(session_id).exists()
+
+
+def revive_session(session_id):
+    """這個 session 確定還在用（出題、送出 prompt、被 resume、自己來拿回答）：記下動靜並取消「已結束」。"""
+    if not session_id:
+        return
+    try:
+        ended_file(session_id).unlink(missing_ok=True)
+    except OSError:
+        pass
+    touch_session(session_id)
+
+
+def takeover_seconds():
+    """出題的對話多久沒動靜才讓別人接手。0 表示只認 SessionEnd，不靠時間猜。"""
+    try:
+        hours = float(read_config(home() / 'config.json').get('takeover_hours', TAKEOVER_HOURS))
+    except (OSError, TypeError, ValueError):
+        hours = TAKEOVER_HOURS
+    return max(hours, 0) * 3600
 
 
 # ---------- 題目與事件 ----------
@@ -143,6 +238,12 @@ class EventLog:
         self.fh.flush()
         os.fsync(self.fh.fileno())
 
+    def rewrite(self, events):
+        """整份換掉（清理用）。直接改寫原檔：換成新檔的話，正在等鎖的行程會寫到被換掉的舊檔。"""
+        self.fh.seek(0)
+        self.fh.truncate()
+        self.append(events)
+
 
 def read_events():
     if not events_path().exists():
@@ -171,22 +272,40 @@ def build_state(events=None):
     return {'questions': items}
 
 
-def deliverable(session_id, cwd, events=None):
-    """這個 session 該拿到、還沒拿過的回答。"""
-    project = project_of(cwd)
+def asker_gone(q, now, limit):
+    """出題的 session 是不是不在了。
+
+    明確結束（SessionEnd）就算；沒有明確結束的（當機、被強制關掉）看它多久沒動靜。
+    只是閒置、Claude Code 還開著的對話不算不在。
+    """
+    asker = q.get('session')
+    if session_ended(asker):
+        return True
+    if limit <= 0:
+        return False
+    seen = last_seen(asker)
+    if not seen:  # 沒有動靜記錄（舊版出的題）：從出題時間起算
+        try:
+            seen = datetime.fromisoformat(q['created']).timestamp()
+        except (KeyError, TypeError, ValueError):
+            seen = 0.0
+    return now - seen > limit
+
+
+def deliverable(session_id, cwd, events=None, project=None):
+    """這個 session 該拿到、還沒拿過的回答。project 可以先算好傳進來，省掉每次問 git。"""
+    project = project or project_of(cwd)
     now = time.time()
+    limit = takeover_seconds()
     out = []
     for q in build_state(events)['questions']:
         asker = q.get('session')
         own = bool(asker) and asker == session_id  # 出題的就是這個 session：不管現在在哪個資料夾
         if not own and q.get('project') != project:
             continue
-        for a in q['answers']:
-            if a['delivered']:
-                continue
-            age = now - datetime.fromisoformat(a['at']).timestamp()
-            if own or not asker or age > ORPHAN_SECONDS:
-                out.append((q, a))
+        if not own and asker and not asker_gone(q, now, limit):
+            continue  # 出題的對話還在：只有它自己能拿
+        out.extend((q, a) for a in q['answers'] if not a['delivered'])
     return out
 
 
@@ -206,13 +325,85 @@ def format_answers(pairs):
     return '\n'.join(lines)
 
 
-def take(session_id, cwd):
-    """取出回答並標成已送達；同一把鎖裡做，兩個 session 不會拿到同一則。"""
+def emit_answers(pairs):
+    """把回答印到 stdout 並確實送出；印不出去會丟例外，呼叫端就不會把它標成已送達。"""
+    sys.stdout.write(format_answers(pairs) + '\n')
+    sys.stdout.flush()
+
+
+def take(session_id, cwd, emit=None, project=None):
+    """取出回答並標成已送達；同一把鎖裡做，兩個 session 不會拿到同一則。
+
+    有給 emit 時，先把回答交出去、成功了才寫「已送達」。中途被砍掉（例如 hook 逾時）
+    的話這則會留到下次再送：寧可重送一次，也不要網頁顯示已收到、agent 卻沒拿到。
+    """
     with EventLog() as log:
-        pairs = deliverable(session_id, cwd, log.read())
+        pairs = deliverable(session_id, cwd, log.read(), project)
+        if pairs and emit:
+            emit(pairs)
         log.append([{'event_id': str(uuid.uuid4()), 'kind': 'delivered', 'ref': a['event_id'],
                      'session': session_id, 'at': now_iso()} for _, a in pairs])
     return pairs
+
+
+def prune(days):
+    """刪掉收起超過 days 天的題目和它們的事件，以及同樣久沒動靜的 session 記錄。回傳刪掉幾題。
+
+    只動已經收起的題目；還沒回答、或回答了還沒收起的，放再久也不刪。
+    """
+    cutoff = time.time() - days * 86400
+    with EventLog() as log:
+        events = log.read()
+        closed_at = {}
+        for e in events:
+            if e.get('kind') != 'closed':
+                continue
+            try:
+                when = datetime.fromisoformat(e['at']).timestamp()
+            except (KeyError, TypeError, ValueError):
+                continue
+            closed_at[e.get('question_id')] = max(when, closed_at.get(e.get('question_id'), 0))
+        gone = {qid for qid, when in closed_at.items() if when < cutoff}
+        removed = 0
+        if gone:
+            answers = {e.get('event_id') for e in events
+                       if e.get('kind') == 'answer' and e.get('question_id') in gone}
+            log.rewrite([e for e in events
+                         if e.get('question_id') not in gone and e.get('ref') not in answers])
+            for path in (home() / 'questions').glob('*.json'):
+                if path.stem in gone:
+                    path.unlink(missing_ok=True)
+                    removed += 1
+    sessions = home() / 'sessions'
+    if sessions.is_dir():
+        for path in sessions.iterdir():
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+            except OSError:
+                continue
+    return removed
+
+
+def keep_days_of(config):
+    """收起的題目留幾天。回 0 表示不自動清：設成 0，或設定值看不懂時（寧可不刪）。"""
+    try:
+        days = float(config.get('keep_days', KEEP_DAYS))
+    except (TypeError, ValueError):
+        return 0
+    return days if days > 0 else 0
+
+
+def auto_prune(days):
+    """服務啟動時清一次，之後每天清一次。"""
+    while True:
+        try:
+            removed = prune(days)
+            if removed:
+                print('自動清掉 %d 題（收起超過 %g 天的）' % (removed, days), flush=True)
+        except Exception:
+            pass  # 清不了不該影響服務，下一輪再試
+        time.sleep(PRUNE_EVERY_SECONDS)
 
 
 def validate_answers(payload, questions):
@@ -220,10 +411,17 @@ def validate_answers(payload, questions):
     if not isinstance(answers, list) or not answers:
         raise ValueError('answers 必須是非空陣列')
     events = []
+    seen = set()
     for item in answers:
-        q = questions.get(item.get('question_id')) if isinstance(item, dict) else None
+        qid = item.get('question_id') if isinstance(item, dict) else None
+        q = questions.get(qid) if isinstance(qid, str) else None
         if not q:
             raise ValueError('找不到題目')
+        if q.get('closed'):
+            raise ValueError('這題已經收起來了')
+        if q.get('answers') or q['id'] in seen:
+            raise ValueError('這題已經回答過了')
+        seen.add(q['id'])
         choice = item.get('choice') or ''
         text = item.get('text') or ''
         if not isinstance(choice, str) or not isinstance(text, str) or len(text) > MAX_TEXT:
@@ -247,6 +445,7 @@ def validate_answers(payload, questions):
 
 class Handler(BaseHTTPRequestHandler):
     config = None
+    last_request = 0.0  # 最後一次有人連進來的時間，閒置自動結束用
 
     def log_message(self, fmt, *args):
         pass
@@ -266,26 +465,43 @@ class Handler(BaseHTTPRequestHandler):
         if origin and origin != 'http://' + host:
             return self.send_text(403, 'Origin 不符')
         token = self.config.get('token')
-        if api and token and not secrets.compare_digest(self.headers.get('X-Inbox-Token', ''), token):
+        given = self.headers.get('X-Inbox-Token', '')
+        # 轉成 bytes 再比：compare_digest 遇到非 ASCII 的字串會丟例外
+        if api and token and not secrets.compare_digest(given.encode('utf-8'), token.encode('utf-8')):
             return self.send_text(401, '需要 token')
         return True
 
-    def send_text(self, code, text, ctype='text/plain; charset=utf-8'):
+    def send_text(self, code, text, ctype='text/plain; charset=utf-8', extra=None):
         body = text.encode('utf-8')
         self.send_response(code)
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('Referrer-Policy', 'no-referrer')
+        for name, value in (extra or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
         return False
 
+    def send_page(self):
+        """送出頁面。CSP 只放行這一次回應帶 nonce 的那段 script，也不准頁面連到外面：
+        就算題目文字的跳脫哪天漏了，塞進來的 script 不會跑，資料也送不出去。"""
+        nonce = secrets.token_urlsafe(16)
+        html = PAGE.read_text(encoding='utf-8').replace('<script>', '<script nonce="%s">' % nonce, 1)
+        csp = "; ".join([
+            "default-src 'none'", "script-src 'nonce-%s'" % nonce, "style-src 'unsafe-inline'",
+            "connect-src 'self'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'"])
+        self.send_text(200, html, 'text/html; charset=utf-8',
+                       extra={'Content-Security-Policy': csp, 'X-Frame-Options': 'DENY'})
+
     def do_GET(self):
+        Handler.last_request = time.time()
         path = self.path.split('?', 1)[0]
         if path == '/':
             if self.check(api=False):
-                self.send_text(200, PAGE.read_text(encoding='utf-8'), 'text/html; charset=utf-8')
+                self.send_page()
         elif path == '/api/state':
             if self.check(api=True):
                 self.send_text(200, json.dumps(build_state(), ensure_ascii=False),
@@ -294,32 +510,81 @@ class Handler(BaseHTTPRequestHandler):
             self.send_text(404, 'not found')
 
     def do_POST(self):
+        Handler.last_request = time.time()
         if self.path != '/api/answer':
             return self.send_text(404, 'not found')
         if not self.check(api=True):
             return
         if not self.headers.get('Content-Type', '').startswith('application/json'):
             return self.send_text(415, '只收 JSON')
-        length = int(self.headers.get('Content-Length') or 0)
+        try:
+            length = int(self.headers.get('Content-Length') or 0)
+        except ValueError:
+            return self.send_text(400, 'Content-Length 不是數字')
         if length <= 0 or length > MAX_BODY:
             return self.send_text(413, '內容太大或是空的')
         try:
             payload = json.loads(self.rfile.read(length).decode('utf-8'))
-            questions = {q['id']: q for q in load_questions()}
-            events = validate_answers(payload, questions)
+            with EventLog() as log:  # 檢查和寫入在同一把鎖裡：連點兩下也只會存一則
+                questions = {q['id']: q for q in build_state(log.read())['questions']}
+                events = validate_answers(payload, questions)
+                log.append(events)
         except ValueError as exc:
             return self.send_text(400, str(exc))
-        with EventLog() as log:
-            log.append(events)
         self.send_text(200, json.dumps({'stored': len(events)}), 'application/json')
+
+
+def idle_too_long(last_request, now, idle_seconds, waiting):
+    """沒有等使用者回答的題目，而且很久沒人連進來：服務可以收工了。"""
+    return idle_seconds > 0 and waiting == 0 and now - last_request > idle_seconds
+
+
+def watch_idle(server, idle_seconds):
+    while True:
+        time.sleep(IDLE_CHECK_SECONDS)
+        try:
+            waiting = sum(1 for q in build_state()['questions'] if not q['closed'] and not q['answers'])
+        except Exception:
+            continue  # 讀不到狀態就先不停，下一輪再看
+        if idle_too_long(Handler.last_request, time.time(), idle_seconds, waiting):
+            print('沒有待回答的題目，也很久沒人連線，服務自動結束；下次出題會自動再啟動。', flush=True)
+            server.shutdown()
+            return
 
 
 def serve(config):
     Handler.config = config
+    Handler.last_request = time.time()
     server = ThreadingHTTPServer((config['host'], config['port']), Handler)
-    (home() / 'server.pid').write_text(str(os.getpid()))  # 綁埠成功才寫：搶輸的不會蓋掉活著的那個
+    pidfile = home() / 'server.pid'
+    pidfile.write_text(str(os.getpid()))  # 綁埠成功才寫：搶輸的不會蓋掉活著的那個
     print('收件匣服務已啟動：' + base_url(config), flush=True)  # 服務的 log 不放 token
-    server.serve_forever()
+
+    def on_term(signum, frame):
+        raise SystemExit(0)
+
+    if threading.current_thread() is threading.main_thread():  # 訊號只能在主執行緒設
+        signal.signal(signal.SIGTERM, on_term)
+    try:
+        idle_seconds = float(config.get('idle_hours') or 0) * 3600
+    except (TypeError, ValueError):
+        idle_seconds = 0  # 設定值看不懂就當成不自動結束
+    if idle_seconds > 0:
+        threading.Thread(target=watch_idle, args=(server, idle_seconds), daemon=True).start()
+    keep_days = keep_days_of(config)
+    if keep_days:
+        threading.Thread(target=auto_prune, args=(keep_days,), daemon=True).start()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        try:  # 結束時收掉自己的 PID 檔；已經被別的服務換掉就不動
+            if pidfile.read_text().strip() == str(os.getpid()):
+                pidfile.unlink()
+        except OSError:
+            pass
 
 
 def server_alive(config):
@@ -369,10 +634,12 @@ def cmd_ask(args):
          'project': project_of(os.getcwd()), 'session': os.environ.get('CLAUDE_CODE_SESSION_ID', ''),
          'created': now_iso()}
     write_json(home() / 'questions' / (q['id'] + '.json'), q)
+    revive_session(q['session'])
     config = load_config()
     up = ensure_server(config)
     print('已放進收件匣：%s' % q['id'])
     print('網址：' + page_url(config) if up else '服務沒起來，請看 %s' % (home() / 'server.log'))
+    warn_exposure(config)
 
 
 def cmd_close(args):
@@ -387,19 +654,24 @@ def cmd_close(args):
 
 
 def cmd_take(args):
-    pairs = take(os.environ.get('CLAUDE_CODE_SESSION_ID', ''), os.getcwd())
-    print(format_answers(pairs) if pairs else '收件匣：沒有新的回覆。')
+    session = os.environ.get('CLAUDE_CODE_SESSION_ID', '')
+    revive_session(session)
+    if not take(session, os.getcwd(), emit=emit_answers):
+        print('收件匣：沒有新的回覆。')
 
 
 def cmd_wait(args):
     deadline = time.time() + args.timeout
     session = os.environ.get('CLAUDE_CODE_SESSION_ID', '')
+    cwd = os.getcwd()
+    project = project_of(cwd)  # 只問 git 一次，不要每 3 秒起一個行程
     while time.time() < deadline:
-        if deliverable(session, os.getcwd()):
-            pairs = take(session, os.getcwd())
-            if pairs:
-                print(format_answers(pairs))
-                return
+        if session_ended(session):  # 對話關掉後殘留的 wait：別把回答拿去印給沒人看的地方
+            print('收件匣：這個對話已經結束，不再等回覆。')
+            sys.exit(3)
+        touch_session(session)
+        if deliverable(session, cwd, project=project) and take(session, cwd, emit=emit_answers, project=project):
+            return
         time.sleep(3)
     print('收件匣：等了 %d 秒沒有新回覆。' % args.timeout)
     sys.exit(2)
@@ -411,9 +683,12 @@ def cmd_hook(args):
         data = json.loads(sys.stdin.read() or '{}')
     except ValueError:
         data = {}
-    pairs = take(data.get('session_id', ''), data.get('cwd') or os.getcwd())
-    if pairs:
-        print(format_answers(pairs))
+    session = data.get('session_id', '')
+    if data.get('hook_event_name') == 'SessionEnd':
+        mark_ended(session)  # 只記下它結束了；這時印出來的東西 agent 已經看不到，不能把回答交給它
+        return
+    revive_session(session)
+    take(session, data.get('cwd') or os.getcwd(), emit=emit_answers)
 
 
 def cmd_list(args):
@@ -424,16 +699,57 @@ def cmd_list(args):
         print('%s  %s  %s  （%s）' % (q['id'], status, q['title'], q['from']))
 
 
+def is_inbox_server(pid):
+    """這個 PID 是不是收件匣服務。PID 檔可能是舊的（例如重開機後號碼被別的程式拿去用）。"""
+    try:
+        out = subprocess.run(['ps', '-p', str(pid), '-o', 'command='],
+                             capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    words = out.stdout.split()
+    return out.returncode == 0 and 'serve' in words and any(w.endswith('inbox.py') for w in words)
+
+
+def cmd_prune(args):
+    days = args.days
+    if days is None:  # 沒指定就用設定的天數；設定是「不自動清」時，手動清用預設天數
+        try:
+            days = keep_days_of(read_config(home() / 'config.json')) or KEEP_DAYS
+        except (OSError, ValueError):
+            days = KEEP_DAYS
+    if days < 1:
+        sys.exit('--days 至少是 1')
+    print('已清掉 %d 題（收起超過 %g 天的）' % (prune(days), days))
+
+
+def cmd_start(args):
+    config = load_config()
+    print(page_url(config) if ensure_server(config) else '啟動失敗')
+    warn_exposure(config)
+
+
+def cmd_url(args):
+    config = load_config()
+    print(page_url(config))
+    warn_exposure(config)
+
+
 def cmd_stop(args):
     pidfile = home() / 'server.pid'
     if not pidfile.exists():
         return print('沒有記錄中的服務')
     try:
-        os.kill(int(pidfile.read_text()), signal.SIGTERM)
-        print('已停止')
+        pid = int(pidfile.read_text())
+        if is_inbox_server(pid):
+            os.kill(pid, signal.SIGTERM)
+            print('已停止')
+        else:
+            print('服務本來就沒在跑')  # 不是我們的服務就不碰它
     except (ProcessLookupError, ValueError):
         print('服務本來就沒在跑')
-    pidfile.unlink()
+    except PermissionError:
+        print('沒有權限停止 PID 檔記的那個程式，沒動它')
+    pidfile.unlink(missing_ok=True)
 
 
 def main(argv=None):
@@ -460,12 +776,14 @@ def main(argv=None):
     p = sub.add_parser('list', help='列出題目')
     p.add_argument('--all', action='store_true')
     p.set_defaults(func=cmd_list)
+    p = sub.add_parser('prune', help='刪掉收起很久的題目，讓資料不會一直變大')
+    p.add_argument('--days', type=int, help='收起超過幾天才刪，預設用 config 的 keep_days（30）')
+    p.set_defaults(func=cmd_prune)
     sub.add_parser('hook', help='給 Claude Code hook 用').set_defaults(func=cmd_hook)
     sub.add_parser('serve', help='前景執行網頁服務').set_defaults(func=lambda a: serve(load_config()))
-    sub.add_parser('start', help='背景啟動網頁服務').set_defaults(
-        func=lambda a: print(page_url(load_config()) if ensure_server(load_config()) else '啟動失敗'))
+    sub.add_parser('start', help='背景啟動網頁服務').set_defaults(func=cmd_start)
     sub.add_parser('stop', help='停止背景服務').set_defaults(func=cmd_stop)
-    sub.add_parser('url', help='印出網址').set_defaults(func=lambda a: print(page_url(load_config())))
+    sub.add_parser('url', help='印出網址').set_defaults(func=cmd_url)
     args = parser.parse_args(argv)
     args.func(args)
 

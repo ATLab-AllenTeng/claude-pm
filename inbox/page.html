@@ -293,6 +293,7 @@
       let STATE = { questions: [] };
       let lastJson = "";
       let dirtyWhileEditing = false;
+      let sending = false;
 
       const $ = (id) => document.getElementById(id);
       const draftKey = (id) => "inbox-draft-" + id;
@@ -515,6 +516,10 @@
       }
 
       async function send(ids) {
+        if (sending || !ids.length) return;
+        sending = true;
+        const buttons = () => document.querySelectorAll("[data-send], #send-all");
+        buttons().forEach((b) => (b.disabled = true));
         const answers = ids.map((id) => {
           const d = getDraft(id);
           const q = STATE.questions.find((x) => x.id === id);
@@ -525,18 +530,24 @@
           };
         });
         $("err").textContent = "";
-        const res = await fetch("/api/answer", {
-          method: "POST",
-          headers: HEADERS,
-          body: JSON.stringify({ answers }),
-        });
-        if (!res.ok) {
-          $("err").textContent = "送出失敗：" + (await res.text());
-          return;
+        let failure = "";
+        try {
+          const res = await fetch("/api/answer", {
+            method: "POST",
+            headers: HEADERS,
+            body: JSON.stringify({ answers }),
+          });
+          if (res.ok) ids.forEach((id) => localStorage.removeItem(draftKey(id)));
+          else failure = "送出失敗：" + (await res.text());
+        } catch (e) {
+          failure = "送出失敗：" + e.message;
         }
-        ids.forEach((id) => localStorage.removeItem(draftKey(id)));
+        sending = false;
         lastJson = "";
         await load();
+        buttons().forEach((b) => (b.disabled = false));
+        updateFooter();
+        if (failure) $("err").textContent = failure;
       }
 
       document.addEventListener("change", (e) => {
