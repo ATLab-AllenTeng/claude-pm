@@ -163,6 +163,17 @@ python3 /path/to/claude-pm/inbox/inbox.py ask --title "..." --option "A=..." --o
 
 服務不會一直掛著：沒有等你回答的題目、而且 12 小時沒人連進來，它會自己結束，下次 agent 出題時自動再啟動。要改時間，在 `config.json` 加 `"idle_hours": 小時數`；設 `0` 就不自動結束。
 
+### 更新
+
+Claude Code 不會自動更新這個 marketplace（除非你在 `/plugin` 的 Marketplaces 裡開啟 auto-update）。要拿新版：
+
+```
+/plugin marketplace update claude-pm
+/reload-plugins
+```
+
+更新 plugin 不會重啟已經在跑的收件匣服務。更新後跑一次 `inbox stop`，下次出題會用新程式自動再啟動。
+
 ### 資料放哪
 
 `~/.claude-inbox/`（可用環境變數 `CLAUDE_INBOX_HOME` 改）：
@@ -202,6 +213,8 @@ Python 3.9 以上。答案自動送回 agent 需要 Claude Code；其他 agent �
 ```bash
 python3 -m unittest discover tests
 ```
+
+版號不用自己管：每次有東西合進 `main`，`.github/workflows/bump-version.yml` 會把 `.claude-plugin/plugin.json` 的 patch 版號加一（Claude Code 靠版號判斷要不要更新，版號沒變使用者就拿不到新內容）。要進 minor 或 major 時，在 PR 裡自己改 `version`，那次就不會再自動加。
 
 </details>
 
