@@ -36,8 +36,13 @@ def main():
         names = ', '.join(test.id().rsplit('.', 1)[-1] for _, test, _ in problems)
         print('::error title=%s::%s' % (escape('%d 個測試沒過 (%s)' % (len(problems), where), True),
                                         escape(names[:MAX_CHARS])))
-    print('%s：跑了 %d 個，失敗 %d，錯誤 %d，略過 %d' % (
-        where, result.testsRun, len(result.failures), len(result.errors), len(result.skipped)))
+    summary = '跑了 %d 個，失敗 %d，錯誤 %d，略過 %d' % (
+        result.testsRun, len(result.failures), len(result.errors), len(result.skipped))
+    skipped = '；'.join('%s（%s）' % (test.id().rsplit('.', 1)[-1], reason) for test, reason in result.skipped)
+    # 略過了哪些也寫出來：某個平台專屬的測試如果悄悄被略過，綠燈就不代表它有被驗到
+    print('::notice title=%s::%s' % (escape('測試結果 (%s)' % where, True),
+                                     escape(summary + ('。略過：' + skipped if skipped else ''))))
+    print('%s：%s' % (where, summary))
     sys.exit(0 if result.wasSuccessful() else 1)
 
 
