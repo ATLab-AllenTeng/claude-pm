@@ -577,20 +577,25 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         Handler.last_request = time.time()
+        try:
+            length = int(self.headers.get('Content-Length') or 0)
+        except ValueError:
+            length = None
+        # 先把請求本文讀完再回錯誤：Windows 關掉還有未讀資料的連線會送 RST，
+        # 對方收不到 403／404，只看到連線被重設（WinError 10053／10054）。
+        raw = self.rfile.read(length) if length and 0 < length <= MAX_BODY else None
         if self.path != '/api/answer':
             return self.send_text(404, 'not found')
         if not self.check(api=True):
             return
         if not self.headers.get('Content-Type', '').startswith('application/json'):
             return self.send_text(415, '只收 JSON')
-        try:
-            length = int(self.headers.get('Content-Length') or 0)
-        except ValueError:
+        if length is None:
             return self.send_text(400, 'Content-Length 不是數字')
-        if length <= 0 or length > MAX_BODY:
+        if raw is None:
             return self.send_text(413, '內容太大或是空的')
         try:
-            payload = json.loads(self.rfile.read(length).decode('utf-8'))
+            payload = json.loads(raw.decode('utf-8'))
             with EventLog() as log:  # 檢查和寫入在同一把鎖裡：連點兩下也只會存一則
                 questions = {q['id']: q for q in build_state(log.read())['questions']}
                 events = validate_answers(payload, questions)
@@ -598,6 +603,18 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             return self.send_text(400, str(exc))
         self.send_text(200, json.dumps({'stored': len(events)}), 'application/json')
+
+
+class InboxServer(ThreadingHTTPServer):
+    """Windows 上不能沿用預設的 SO_REUSEADDR：那裡它允許兩個行程同時綁同一個埠，
+    兩個服務會一起活著、輪流接請求。改成獨佔，搶輸的那個照樣綁不到就結束。"""
+    allow_reuse_address = not IS_WINDOWS
+
+    def server_bind(self):
+        if IS_WINDOWS:
+            import socket
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 def idle_too_long(last_request, now, idle_seconds, waiting):
@@ -621,7 +638,14 @@ def watch_idle(server, idle_seconds):
 def serve(config):
     Handler.config = config
     Handler.last_request = time.time()
-    server = ThreadingHTTPServer((config['host'], config['port']), Handler)
+    try:
+        server = InboxServer((config['host'], config['port']), Handler)
+    except PermissionError:
+        if IS_WINDOWS:  # WinError 10013：埠落在 Hyper-V／WSL／Docker 保留的範圍，沒人在用也綁不到
+            print('綁不到埠 %s：可能在 Windows 保留的範圍裡（用 netsh interface ipv4 show '
+                  'excludedportrange protocol=tcp 查）。請在 %s 換一個 port。'
+                  % (config['port'], home() / 'config.json'), flush=True)
+        raise
     pidfile = home() / 'server.pid'
     pidfile.write_text(str(os.getpid()))  # 綁埠成功才寫：搶輸的不會蓋掉活著的那個
     print('收件匣服務已啟動：' + base_url(config), flush=True)  # 服務的 log 不放 token
@@ -669,10 +693,18 @@ def server_alive(config):
 def ensure_server(config):
     if server_alive(config):
         return True
-    log = open(home() / 'server.log', 'a')
-    subprocess.Popen([sys.executable, str(Path(__file__).resolve()), 'serve'],
-                            stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                            start_new_session=True)
+    command = [sys.executable, str(Path(__file__).resolve()), 'serve']
+    # 子行程拿到自己的那份 handle；這邊用完就關，否則 Windows 上 server.log 會一直被佔著、刪不掉
+    with open(home() / 'server.log', 'a', encoding='utf-8') as log:
+        if IS_WINDOWS:
+            # 脫離目前的主控台：不跳視窗，hook 或終端機結束時也不會被一起帶走
+            flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                     | subprocess.CREATE_NO_WINDOW)
+            subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                             creationflags=flags, close_fds=True)
+        else:
+            subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                             start_new_session=True)
     for _ in range(20):
         time.sleep(0.2)
         if server_alive(config):

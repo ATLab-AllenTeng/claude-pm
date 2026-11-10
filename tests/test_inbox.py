@@ -443,8 +443,9 @@ class Server(Base):
     def start(self, host='127.0.0.1', token=''):
         port = free_port()
         inbox.Handler.config = {'host': host, 'port': port, 'token': token}
-        httpd = ThreadingHTTPServer((host, port), inbox.Handler)
+        httpd = inbox.InboxServer((host, port), inbox.Handler)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
         self.addCleanup(httpd.shutdown)
         return port
 
@@ -534,6 +535,18 @@ class Server(Base):
             self.assertIn("connect-src 'self'", csp)
             seen.append(nonce)
         self.assertNotEqual(seen[0], seen[1])  # 每次回應換一個
+
+    def test_error_reply_still_arrives_when_request_has_a_body(self):
+        port = self.start(token='secret-token')
+        body = {'answers': [{'question_id': 'x', 'choice': 'A', 'text': 'y' * 2000}]}
+        self.assertEqual(self.req(port, '/api/nope', body)[0], 404)  # 路徑不對
+        self.assertEqual(self.req(port, '/api/answer', body)[0], 401)  # 沒帶 token
+        self.assertEqual(self.req(port, '/api/answer', body, headers={'Origin': 'http://evil.example'})[0], 403)
+
+    def test_second_server_cannot_bind_a_port_that_is_in_use(self):
+        port = self.start()
+        with self.assertRaises(OSError):
+            inbox.InboxServer(('127.0.0.1', port), inbox.Handler)
 
     def test_token_required_when_configured(self):
         port = self.start(token='secret-token')
