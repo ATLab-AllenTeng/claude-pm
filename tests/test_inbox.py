@@ -636,6 +636,12 @@ class Server(Base):
         self.assertEqual(self.req(port, '/api/answer', body)[0], 401)  # 沒帶 token
         self.assertEqual(self.req(port, '/api/answer', body, headers={'Origin': 'http://evil.example'})[0], 403)
 
+    def test_server_starts_without_reverse_dns_lookup(self):
+        import socket
+        with mock.patch.object(socket, 'getfqdn', side_effect=AssertionError('不該反查主機名稱')):
+            port = self.start()
+        self.assertEqual(self.req(port, '/')[0], 200)
+
     def test_second_server_cannot_bind_a_port_that_is_in_use(self):
         port = self.start()
         with self.assertRaises(OSError):

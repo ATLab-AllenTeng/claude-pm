@@ -632,10 +632,14 @@ class InboxServer(ThreadingHTTPServer):
     allow_reuse_address = not IS_WINDOWS
 
     def server_bind(self):
+        import socketserver
         if IS_WINDOWS:
             import socket
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-        super().server_bind()
+        # 不走 HTTPServer.server_bind：它會用 getfqdn 反查主機名稱，macOS 上可能卡十幾秒，
+        # 出題的那一方等不到服務就會回報「服務沒起來」。查到的名稱我們也用不到。
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 def idle_too_long(last_request, now, idle_seconds, waiting):
