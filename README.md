@@ -64,9 +64,11 @@ Claude Code 專用的「決定信箱」：agent 要你拍板的事，統一放�
 在 Claude Code 裡輸入：
 
 ```
-/plugin marketplace add chenjackle45/claude-inbox
-/plugin install inbox@claude-inbox
+/plugin marketplace add ATLab-AllenTeng/claude-pm
+/plugin install inbox@claude-pm
 ```
+
+> 這是 [chenjackle45/claude-inbox](https://github.com/chenjackle45/claude-inbox) 的分支版本，marketplace 名稱是 `claude-pm`，可以和原版同時安裝。
 
 裝好後重開一次 Claude Code，然後對 agent 說：
 
@@ -119,9 +121,9 @@ inbox ask --title "要不要上新版？" --option "A=上" --option "B=不上" -
 收件匣的核心是一支 Python 指令加一個網頁，不綁 Claude Code。plugin 只是 Claude Code 專用的打包。其他 agent 能在 shell 裡直接跑同一支指令：
 
 ```bash
-git clone https://github.com/chenjackle45/claude-inbox
-python3 claude-inbox/inbox/inbox.py ask --title "要不要上新版？" --option "A=上" --option "B=不上"
-python3 claude-inbox/inbox/inbox.py wait --timeout 1800   # 有回覆時印出答案並結束
+git clone https://github.com/ATLab-AllenTeng/claude-pm
+python3 claude-pm/inbox/inbox.py ask --title "要不要上新版？" --option "A=上" --option "B=不上"
+python3 claude-pm/inbox/inbox.py wait --timeout 1800   # 有回覆時印出答案並結束
 ```
 
 其他 agent 沒有 Claude Code 的 hook，答案不會自動出現在上下文，要靠它自己跑 `wait` 或 `take` 去拿。把下面這段貼進它的規則檔（例如 `AGENTS.md`），路徑換成你放的位置：
@@ -129,7 +131,7 @@ python3 claude-inbox/inbox/inbox.py wait --timeout 1800   # 有回覆時印出�
 ```markdown
 ## 收件匣
 需要問我的事，用下面的指令放進收件匣，不要在對話裡停下來等：
-python3 /path/to/claude-inbox/inbox/inbox.py ask --title "..." --option "A=..." --option "B=..."
+python3 /path/to/claude-pm/inbox/inbox.py ask --title "..." --option "A=..." --option "B=..."
 先做不受這題影響的工作。一定要等答案時，在背景跑 `... inbox.py wait --timeout 1800`。
 處理完一題後跑 `... inbox.py close <題號>`。
 ```
@@ -160,6 +162,17 @@ python3 /path/to/claude-inbox/inbox/inbox.py ask --title "..." --option "A=..." 
 位址只支援 IPv4。token 不分本機或遠端，第一次使用時自動產生，寫進同一個檔（檔案權限 600，資料夾權限 700）。改位址或換 token 後都要重新啟動服務：`inbox stop` 再 `inbox start`。執行中的服務不會自動套用新設定，舊 token 在它重啟前仍然有效。用 `inbox url` 可以印出帶 token 的完整網址。
 
 服務不會一直掛著：沒有等你回答的題目、而且 12 小時沒人連進來，它會自己結束，下次 agent 出題時自動再啟動。要改時間，在 `config.json` 加 `"idle_hours": 小時數`；設 `0` 就不自動結束。
+
+### 更新
+
+Claude Code 不會自動更新這個 marketplace（除非你在 `/plugin` 的 Marketplaces 裡開啟 auto-update）。要拿新版：
+
+```
+/plugin marketplace update claude-pm
+/reload-plugins
+```
+
+更新 plugin 不會重啟已經在跑的收件匣服務。更新後跑一次 `inbox stop`，下次出題會用新程式自動再啟動。
 
 ### 資料放哪
 
@@ -200,6 +213,8 @@ Python 3.9 以上。答案自動送回 agent 需要 Claude Code；其他 agent �
 ```bash
 python3 -m unittest discover tests
 ```
+
+版號不用自己管：每次有東西合進 `main`，`.github/workflows/bump-version.yml` 會把 `.claude-plugin/plugin.json` 的 patch 版號加一（Claude Code 靠版號判斷要不要更新，版號沒變使用者就拿不到新內容）。要進 minor 或 major 時，在 PR 裡自己改 `version`，那次就不會再自動加。
 
 </details>
 

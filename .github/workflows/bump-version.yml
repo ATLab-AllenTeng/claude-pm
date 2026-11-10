@@ -1,0 +1,42 @@
+# 每次有東西合進 main，就把 plugin.json 的 patch 版號加一並提交回 main。
+# Claude Code 靠版號判斷要不要更新已安裝的 plugin，版號沒變使用者就拿不到新內容。
+# PR 裡已經自己改過版號（例如手動進 minor）的話，這裡不會再加。
+name: 自動推進版號
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+# 一次只跑一個：兩個 PR 接連合併時，不會同時去改同一個檔
+concurrency:
+  group: bump-version
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main        # 拿 main 最新的狀態，而不是觸發這次執行的那個 commit
+          fetch-depth: 0   # 要讀得到推送之前的 commit
+
+      - name: 決定要不要推進版號
+        id: bump
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: python3 .github/scripts/bump_version.py "$BEFORE"
+
+      - name: 提交新版號
+        if: steps.bump.outputs.bumped == 'true'
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .claude-plugin/plugin.json
+          git commit -m "chore: 版本推進到 $VERSION"
+          git push origin HEAD:main
