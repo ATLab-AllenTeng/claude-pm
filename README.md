@@ -4,10 +4,10 @@
 
 ### 讓你的 agent 別再停在那邊等你回一句「好」
 
-Claude Code 專用的「決定信箱」：agent 要你拍板的事，統一放進一個網頁。<br>
+Claude Code 專用的「決定信箱」：agent 要你拍板的事、做完要你知道的結果，統一放進一個網頁。<br>
 你有空時一次看完、一次回答，**答案自動回到 agent 手上**。
 
-![license MIT](https://img.shields.io/badge/license-MIT-green) ![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-blue) ![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-d97757)
+![license MIT](https://img.shields.io/badge/license-MIT-green) ![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-blue) ![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-d97757) ![macOS | Linux | Windows](https://img.shields.io/badge/macOS_%7C_Linux_%7C_Windows-supported-6c757d) [![測試](https://github.com/ATLab-AllenTeng/claude-pm/actions/workflows/test.yml/badge.svg)](https://github.com/ATLab-AllenTeng/claude-pm/actions/workflows/test.yml)
 
 <img src="docs/demo.gif" alt="示範：在收件匣網頁選答案、寫補充、送出，agent 立刻收到" width="760">
 
@@ -48,6 +48,12 @@ Claude Code 專用的「決定信箱」：agent 要你拍板的事，統一放�
 </tr>
 </table>
 
+<div align="center">
+<img src="docs/shot-reports.png" alt="收件匣網頁：上方是待回答的題目，下方是完成摘要，每則有意見欄與「已讀，刪除」" width="760">
+</div>
+
+agent 做完一件事，會放一則**完成摘要**：做了什麼、結果在哪、驗證到哪。摘要和要你決定的題目分開，讀完按「已讀，刪除」就不見了；有意見寫一句再刪，會送回給 agent。
+
 ## 為什麼好用
 
 | | |
@@ -57,7 +63,8 @@ Claude Code 專用的「決定信箱」：agent 要你拍板的事，統一放�
 | **答案自動回去** | 用 Claude Code 的 hook：你送出後，agent 下一輪開始時答案就已經在它的上下文裡，不用你再貼 |
 | **不叫 AI、不上雲** | 只用 Python 標準庫。題目就是 agent 寫的那一份，資料全部放在你自己的電腦 |
 | **預設安全** | 只開在本機，所有操作都要 token；題目文字一律當純文字顯示，不會被執行 |
-| **手機也能回** | 把位址改成你的 Tailscale 或內網位址，就能在手機上回答（見下方進階說明） |
+| **手機、遠端也能回** | 搭配 Tailscale Serve，手機或別台電腦用 HTTPS 就能開，服務本身不對外（見下方進階說明） |
+| **三個平台都能跑** | macOS、Linux、原生 Windows（不需要 WSL），每次改動都在三個平台上跑測試 |
 | **做完有摘要** | agent 做完一件事可以放一則「完成摘要」，在收件匣裡自成一區。你讀完按刪除就不見了，有意見寫一句就會送回給它 |
 
 ## 30 秒開始
@@ -69,7 +76,7 @@ Claude Code 專用的「決定信箱」：agent 要你拍板的事，統一放�
 /plugin install inbox@claude-pm
 ```
 
-> 這是 [chenjackle45/claude-inbox](https://github.com/chenjackle45/claude-inbox) 的分支版本，marketplace 名稱是 `claude-pm`，可以和原版同時安裝。
+> 這是 [chenjackle45/claude-inbox](https://github.com/chenjackle45/claude-inbox) 的分支版本，marketplace 名稱是 `claude-pm`，可以和原版同時安裝。和原版的差別見「[這個分支多了什麼](#這個分支多了什麼)」。
 
 裝好後重開一次 Claude Code，然後對 agent 說：
 
@@ -89,17 +96,18 @@ Claude Code 專用的「決定信箱」：agent 要你拍板的事，統一放�
 照回覆繼續做；這件處理完可跑 inbox close <題號> 把它收起來。
 ```
 
-想自己出一題試試看：
+想自己出一題、放一則摘要試試看：
 
 ```bash
 inbox ask --title "要不要上新版？" --option "A=上" --option "B=不上" --recommend A
+inbox report --title "新版：完成，已上線" --body "測試都過。"
 ```
 
 > `inbox` 指令是給 agent 的 Bash 用的。你自己在終端機試的話，改用 `python3 <plugin 資料夾>/inbox/inbox.py`（Windows 用 `python`），後面的參數一樣。
 
 ## 你已經有自己的開發規則？疊上去，不要換掉
 
-收件匣不會動你的 `CLAUDE.md`、`AGENTS.md` 或任何現有流程。它只加三樣東西：一個 `inbox` 指令、一個網頁，和一個在每輪開始時把答案送進 agent 的 hook。
+收件匣不會動你的 `CLAUDE.md`、`AGENTS.md` 或任何現有流程。它只加三樣東西：一個 `inbox` 指令、一個網頁，和幾個 hook（每輪開始時把答案送進 agent、對話結束時記一筆）。
 
 所以你原本的規則照舊：哪些事要先問你、哪些事 agent 可以自己決定，都沒有改變，只是「問你」的地方從對話換成收件匣。想讓 agent 這樣用，把下面這段貼進你的 `CLAUDE.md`：
 
@@ -107,6 +115,7 @@ inbox ask --title "要不要上新版？" --option "A=上" --option "B=不上" -
 ## 收件匣
 需要問我的事（照上面的規則本來就要問我的那些），一律用 `inbox ask` 放進收件匣，不要在對話裡停下來等。
 不需要問我的事，照原本的規則自己決定，不要因為有收件匣就多問。
+一件事做完，用 `inbox report` 放一則完成摘要：做了什麼、結果在哪、驗證到哪。
 ```
 
 沒有自己的規則也沒關係，直接用預設就行。
@@ -145,14 +154,57 @@ python3 /path/to/claude-pm/inbox/inbox.py ask --title "..." --option "A=..." --o
 - 程式靠環境變數 `CLAUDE_CODE_SESSION_ID` 認出題的對話。其他 agent 沒有它，題目會變成匿名，同一個專案資料夾裡的任何 agent 都拿得到答案。兩個 agent 同時在同一個專案出題時，可能拿到對方的答案。
 - 這個用法還沒有拿 Codex 等實際跑過，是依程式行為寫的。
 
-## 覺得有用？
+## 這個分支多了什麼
 
-按個 ⭐ **Star** 讓更多人看到，也歡迎開 Issue 告訴我哪裡卡住、哪裡想要更好。
+原版是 [chenjackle45/claude-inbox](https://github.com/chenjackle45/claude-inbox)。這個分支在它上面加了這些：
+
+| | |
+|---|---|
+| **原生 Windows** | 不需要 WSL。檔案鎖、編碼、背景服務、指令入口都改成跨平台 |
+| **完成摘要** | `inbox report`：做完的結果自成一區，讀完即刪，有意見會送回 agent |
+| **遠端也能看** | `public_url` 設定搭配 Tailscale Serve，用 HTTPS 從手機或別台電腦開 |
+| **答案不會送丟** | 成功交給 agent 才標成已送達；用 `SessionEnd` 判斷對話結束，閒置的對話不會被別的對話搶走答案 |
+| **總PM 遠端也能派工** | 開不了獨立對話時改用子代理；每條線結束發一則完成摘要 |
+| **自己收拾** | 收起超過 30 天的題目自動清掉；背景服務閒置 12 小時自己結束；`inbox stop` 不會誤殺別的程式 |
+| **多幾層防護** | 頁面加 CSP、已回答的題目不收第二則、格式不對的請求回錯誤碼、走沒加密的網路時印出提醒 |
+| **自動化** | 三個平台的 CI；合進 `main` 自動推進版號，已安裝的人拿得到更新 |
+
+覺得有用的話，請到[原版](https://github.com/chenjackle45/claude-inbox)按個 ⭐ **Star**，功勞是原作者的。
 
 ---
 
 <details>
-<summary><b>進階：從手機看、資料放哪、答案送給哪個對話</b></summary>
+<summary><b>進階：指令與設定一覽、從手機看、資料放哪、答案送給哪個對話、原生 Windows</b></summary>
+
+### 指令一覽
+
+| 指令 | 做什麼 |
+|---|---|
+| `inbox ask --title ... [--option A=...] [--recommend A] [--body ...] [--deadline ...]` | 出一題。加 `--info` 是知會，使用者按「我知道了」就好 |
+| `inbox report --title ... [--body ...]` | 放一則完成摘要，使用者讀完就刪 |
+| `inbox wait [--timeout 秒]` | 等到有新回覆才結束（預設等 1800 秒） |
+| `inbox take` | 馬上取出這個對話的新回覆 |
+| `inbox close <題號>...` | 把處理完的題目收起來 |
+| `inbox list [--all]` | 列出題目與摘要 |
+| `inbox url` | 印出帶 token 的網址 |
+| `inbox start` / `inbox stop` | 啟動、停止背景服務 |
+| `inbox prune [--days N]` | 馬上清掉收起很久的題目 |
+
+`--body` 太長時改用 `--body-file 檔案`；`--from 名稱` 可以改顯示的來源（預設是專案資料夾名）。
+
+### 設定一覽
+
+`~/.claude-inbox/config.json`，全部都可以不寫。改完要 `inbox stop` 再 `inbox start` 才生效。
+
+| 設定 | 預設 | 意思 |
+|---|---|---|
+| `host` | `127.0.0.1` | 服務聽在哪個位址。只支援 IPv4 |
+| `port` | `7799` | 服務的埠 |
+| `token` | 自動產生 | 開網頁和呼叫 API 都要帶。想換就刪掉這一行，下次會重新產生 |
+| `public_url` | 沒有 | 你在別台裝置上實際打開的網址（例如 Tailscale Serve 給的），見「從手機或別台電腦看」 |
+| `idle_hours` | `12` | 沒有待回答的題目與未讀摘要、又這麼久沒人連進來，服務自己結束。`0` 是不自動結束 |
+| `takeover_hours` | `24` | 出題的對話沒正常結束、又這麼久沒動靜，同專案的其他對話才接手它的答案。`0` 是只認結束通知 |
+| `keep_days` | `30` | 收起的題目留幾天。`0` 是不自動清 |
 
 ### 從手機或別台電腦看
 
