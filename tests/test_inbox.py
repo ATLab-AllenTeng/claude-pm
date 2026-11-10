@@ -214,6 +214,51 @@ class Delivery(Base):
         self.assertTrue(inbox.build_state()['questions'][0]['closed'])
 
 
+class Prune(Base):
+    def close_at(self, qid, days_ago):
+        when = (datetime.now().astimezone() - timedelta(days=days_ago)).isoformat(timespec='seconds')
+        with inbox.EventLog() as log:
+            log.append([{'event_id': 'c-' + qid, 'kind': 'closed', 'question_id': qid, 'at': when}])
+
+    def test_prune_removes_only_questions_closed_long_ago(self):
+        old = self.ask('--title', '很久以前收起的', '--option', 'A=甲')
+        recent = self.ask('--title', '最近收起的', '--option', 'A=甲')
+        waiting = self.ask('--title', '還沒回答的', '--option', 'A=甲')
+        answered = self.ask('--title', '回答了還沒收起的', '--option', 'A=甲')
+        for qid in (old, recent, answered):
+            self.answer(qid)
+        self.assertEqual(len(inbox.take('sess-1', str(self.project))), 3)
+        self.close_at(old, 40)
+        self.close_at(recent, 3)
+        stale = inbox.session_file('long-gone')
+        stale.touch()
+        os.utime(stale, (time.time() - 40 * 86400,) * 2)
+        with redirect_stdout(io.StringIO()) as out:
+            inbox.main(['prune', '--days', '30'])
+        self.assertIn('已清掉 1 題', out.getvalue())
+        self.assertEqual({q['id'] for q in inbox.load_questions()}, {recent, waiting, answered})
+        events = inbox.read_events()
+        self.assertFalse([e for e in events if e.get('question_id') == old])
+        self.assertEqual(len([e for e in events if e['kind'] == 'delivered']), 2)  # 被刪那題的送達紀錄也清掉
+        state = {q['id']: q for q in inbox.build_state()['questions']}
+        self.assertTrue(state[recent]['closed'])
+        self.assertTrue(state[answered]['answers'][0]['delivered'])
+        self.assertFalse(stale.exists())
+        self.assertGreater(inbox.last_seen('sess-1'), 0)  # 還有動靜的對話記錄留著
+        with redirect_stdout(io.StringIO()) as out:
+            inbox.main(['prune'])
+        self.assertIn('已清掉 0 題', out.getvalue())
+
+    def test_events_can_still_be_appended_after_prune_rewrites_the_file(self):
+        old = self.ask('--title', '舊題')
+        self.close_at(old, 40)
+        self.assertEqual(inbox.prune(30), 1)
+        qid = self.ask('--title', '新題', '--option', 'A=甲')
+        self.answer(qid)
+        self.assertEqual(len(inbox.take('sess-1', str(self.project))), 1)
+        self.assertEqual(oct(inbox.events_path().stat().st_mode & 0o777), '0o600')
+
+
 class Server(Base):
     def start(self, host='127.0.0.1', token=''):
         port = free_port()

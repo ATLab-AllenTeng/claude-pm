@@ -172,6 +172,12 @@ class EventLog:
         self.fh.flush()
         os.fsync(self.fh.fileno())
 
+    def rewrite(self, events):
+        """整份換掉（清理用）。直接改寫原檔：換成新檔的話，正在等鎖的行程會寫到被換掉的舊檔。"""
+        self.fh.seek(0)
+        self.fh.truncate()
+        self.append(events)
+
 
 def read_events():
     if not events_path().exists():
@@ -257,6 +263,45 @@ def take(session_id, cwd, emit=None, project=None):
         log.append([{'event_id': str(uuid.uuid4()), 'kind': 'delivered', 'ref': a['event_id'],
                      'session': session_id, 'at': now_iso()} for _, a in pairs])
     return pairs
+
+
+def prune(days):
+    """刪掉收起超過 days 天的題目和它們的事件，以及同樣久沒動靜的 session 記錄。回傳刪掉幾題。
+
+    只動已經收起的題目；還沒回答、或回答了還沒收起的，放再久也不刪。
+    """
+    cutoff = time.time() - days * 86400
+    with EventLog() as log:
+        events = log.read()
+        closed_at = {}
+        for e in events:
+            if e.get('kind') != 'closed':
+                continue
+            try:
+                when = datetime.fromisoformat(e['at']).timestamp()
+            except (KeyError, TypeError, ValueError):
+                continue
+            closed_at[e.get('question_id')] = max(when, closed_at.get(e.get('question_id'), 0))
+        gone = {qid for qid, when in closed_at.items() if when < cutoff}
+        removed = 0
+        if gone:
+            answers = {e.get('event_id') for e in events
+                       if e.get('kind') == 'answer' and e.get('question_id') in gone}
+            log.rewrite([e for e in events
+                         if e.get('question_id') not in gone and e.get('ref') not in answers])
+            for path in (home() / 'questions').glob('*.json'):
+                if path.stem in gone:
+                    path.unlink(missing_ok=True)
+                    removed += 1
+    sessions = home() / 'sessions'
+    if sessions.is_dir():
+        for path in sessions.iterdir():
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+            except OSError:
+                continue
+    return removed
 
 
 def validate_answers(payload, questions):
@@ -520,6 +565,12 @@ def is_inbox_server(pid):
     return out.returncode == 0 and 'serve' in words and any(w.endswith('inbox.py') for w in words)
 
 
+def cmd_prune(args):
+    if args.days < 1:
+        sys.exit('--days 至少是 1')
+    print('已清掉 %d 題（收起超過 %d 天的）' % (prune(args.days), args.days))
+
+
 def cmd_stop(args):
     pidfile = home() / 'server.pid'
     if not pidfile.exists():
@@ -562,6 +613,9 @@ def main(argv=None):
     p = sub.add_parser('list', help='列出題目')
     p.add_argument('--all', action='store_true')
     p.set_defaults(func=cmd_list)
+    p = sub.add_parser('prune', help='刪掉收起很久的題目，讓資料不會一直變大')
+    p.add_argument('--days', type=int, default=30, help='收起超過幾天才刪，預設 30')
+    p.set_defaults(func=cmd_prune)
     sub.add_parser('hook', help='給 Claude Code hook 用').set_defaults(func=cmd_hook)
     sub.add_parser('serve', help='前景執行網頁服務').set_defaults(func=lambda a: serve(load_config()))
     sub.add_parser('start', help='背景啟動網頁服務').set_defaults(

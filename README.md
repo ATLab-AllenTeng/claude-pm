@@ -164,11 +164,13 @@ python3 /path/to/claude-inbox/inbox/inbox.py ask --title "..." --option "A=..." 
 | 檔 | 內容 |
 |---|---|
 | `questions/*.json` | 題目，一題一檔 |
-| `events.jsonl` | 你的回答、送達紀錄、收起紀錄，只增不改 |
+| `events.jsonl` | 你的回答、送達紀錄、收起紀錄；平常只增不改，`inbox prune` 清理時才會改寫 |
 | `config.json` | 位址、埠、token |
 | `sessions/` | 每個對話最後一次有動靜的時間（檔名是對話代號的雜湊，內容是空的） |
 
 題目與答案都是明文，不要放密碼或金鑰。
+
+資料不會自己變少。用久了跑 `inbox prune`，會刪掉收起超過 30 天的題目和它們的紀錄（`--days N` 可以改天數）；還沒回答、或還沒收起的題目不會被刪。
 
 ### 答案送給哪個對話
 
