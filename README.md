@@ -116,6 +116,8 @@ inbox ask --title "要不要上新版？" --option "A=上" --option "B=不上" -
 
 這是給還沒有自己流程的人用的預設做法。你已經有自己的總PM、狀態檔或審查流程時，agent 會沿用你的，只補收件匣那一塊，不會另建一套。
 
+**遠端操作時也能派工。** 用 Remote Control 從手機或別台電腦操作總PM 時，它開不了獨立的 worker 對話（那個功能只接受在桌面 app 本機發起）。這時它會改用子代理當工作線，各自在自己的 worktree 裡做，你在遠端看得到它們的進度。差別是子代理活在總PM 的對話裡，你不能直接跟某一條線講話，要調整得透過總PM。
+
 ## 不用 Claude Code 也能用（Codex 等其他 agent）
 
 收件匣的核心是一支 Python 指令加一個網頁，不綁 Claude Code。plugin 只是 Claude Code 專用的打包。其他 agent 能在 shell 裡直接跑同一支指令：
