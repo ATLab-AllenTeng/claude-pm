@@ -447,6 +447,29 @@ class Server(Base):
             except ProcessLookupError:
                 pass
 
+    def test_idle_rule_needs_no_waiting_question_and_a_long_quiet_period(self):
+        hour = 3600
+        self.assertTrue(inbox.idle_too_long(0, 13 * hour, 12 * hour, waiting=0))
+        self.assertFalse(inbox.idle_too_long(0, 11 * hour, 12 * hour, waiting=0))  # 還不夠久
+        self.assertFalse(inbox.idle_too_long(0, 99 * hour, 12 * hour, waiting=1))  # 還有題目等你回
+        self.assertFalse(inbox.idle_too_long(0, 99 * hour, 0, waiting=0))  # idle_hours 設 0：不自動結束
+        self.assertEqual(inbox.read_config(Path('/nonexistent'))['idle_hours'], 12)
+
+    def test_server_exits_by_itself_when_idle_and_nothing_is_waiting(self):
+        import threading as th
+        qid = self.ask('--title', '已經回答的題', '--option', 'A=甲')
+        self.answer(qid)  # 回答過的不算「等你回」
+        config = {'host': '127.0.0.1', 'port': free_port(), 'token': 't', 'idle_hours': 0.00005}  # 0.18 秒
+        pid_file = Path(os.environ['CLAUDE_INBOX_HOME']) / 'server.pid'
+        with mock.patch.object(inbox, 'IDLE_CHECK_SECONDS', 0.1), redirect_stdout(io.StringIO()) as out:
+            worker = th.Thread(target=inbox.serve, args=(config,), daemon=True)
+            worker.start()
+            worker.join(timeout=10)
+        self.assertFalse(worker.is_alive())
+        self.assertIn('自動結束', out.getvalue())
+        self.assertFalse(pid_file.exists())
+        self.assertFalse(inbox.server_alive(config))
+
     def test_loopback_default_also_gets_private_token_and_folder(self):
         old = os.umask(0o022)  # 在寬鬆的 umask 下測，權限被放寬時才會變紅
         self.addCleanup(os.umask, old)

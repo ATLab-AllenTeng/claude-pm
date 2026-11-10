@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -25,6 +26,7 @@ PAGE = HERE / 'page.html'
 DEFAULT_PORT = 7799
 MAX_BODY = 64 * 1024
 MAX_TEXT = 4000
+IDLE_CHECK_SECONDS = 60
 ORPHAN_SECONDS = 30 * 60  # 回答放了 30 分鐘、出題的 session 也 30 分鐘沒動靜，同專案其他 session 才可以拿
 
 
@@ -38,7 +40,7 @@ def home():
 
 
 def read_config(path):
-    config = {'host': '127.0.0.1', 'port': DEFAULT_PORT, 'token': ''}
+    config = {'host': '127.0.0.1', 'port': DEFAULT_PORT, 'token': '', 'idle_hours': 12}
     if path.exists():
         config.update(json.loads(path.read_text(encoding='utf-8')))
     return config
@@ -343,6 +345,7 @@ def validate_answers(payload, questions):
 
 class Handler(BaseHTTPRequestHandler):
     config = None
+    last_request = 0.0  # 最後一次有人連進來的時間，閒置自動結束用
 
     def log_message(self, fmt, *args):
         pass
@@ -394,6 +397,7 @@ class Handler(BaseHTTPRequestHandler):
                        extra={'Content-Security-Policy': csp, 'X-Frame-Options': 'DENY'})
 
     def do_GET(self):
+        Handler.last_request = time.time()
         path = self.path.split('?', 1)[0]
         if path == '/':
             if self.check(api=False):
@@ -406,6 +410,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_text(404, 'not found')
 
     def do_POST(self):
+        Handler.last_request = time.time()
         if self.path != '/api/answer':
             return self.send_text(404, 'not found')
         if not self.check(api=True):
@@ -429,8 +434,27 @@ class Handler(BaseHTTPRequestHandler):
         self.send_text(200, json.dumps({'stored': len(events)}), 'application/json')
 
 
+def idle_too_long(last_request, now, idle_seconds, waiting):
+    """沒有等使用者回答的題目，而且很久沒人連進來：服務可以收工了。"""
+    return idle_seconds > 0 and waiting == 0 and now - last_request > idle_seconds
+
+
+def watch_idle(server, idle_seconds):
+    while True:
+        time.sleep(IDLE_CHECK_SECONDS)
+        try:
+            waiting = sum(1 for q in build_state()['questions'] if not q['closed'] and not q['answers'])
+        except Exception:
+            continue  # 讀不到狀態就先不停，下一輪再看
+        if idle_too_long(Handler.last_request, time.time(), idle_seconds, waiting):
+            print('沒有待回答的題目，也很久沒人連線，服務自動結束；下次出題會自動再啟動。', flush=True)
+            server.shutdown()
+            return
+
+
 def serve(config):
     Handler.config = config
+    Handler.last_request = time.time()
     server = ThreadingHTTPServer((config['host'], config['port']), Handler)
     pidfile = home() / 'server.pid'
     pidfile.write_text(str(os.getpid()))  # 綁埠成功才寫：搶輸的不會蓋掉活著的那個
@@ -439,7 +463,14 @@ def serve(config):
     def on_term(signum, frame):
         raise SystemExit(0)
 
-    signal.signal(signal.SIGTERM, on_term)
+    if threading.current_thread() is threading.main_thread():  # 訊號只能在主執行緒設
+        signal.signal(signal.SIGTERM, on_term)
+    try:
+        idle_seconds = float(config.get('idle_hours') or 0) * 3600
+    except (TypeError, ValueError):
+        idle_seconds = 0  # 設定值看不懂就當成不自動結束
+    if idle_seconds > 0:
+        threading.Thread(target=watch_idle, args=(server, idle_seconds), daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

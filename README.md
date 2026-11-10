@@ -157,6 +157,8 @@ python3 /path/to/claude-inbox/inbox/inbox.py ask --title "..." --option "A=..." 
 
 位址只支援 IPv4。token 不分本機或遠端，第一次使用時自動產生，寫進同一個檔（檔案權限 600，資料夾權限 700）。改位址或換 token 後都要重新啟動服務：`inbox stop` 再 `inbox start`。執行中的服務不會自動套用新設定，舊 token 在它重啟前仍然有效。用 `inbox url` 可以印出帶 token 的完整網址。
 
+服務不會一直掛著：沒有等你回答的題目、而且 12 小時沒人連進來，它會自己結束，下次 agent 出題時自動再啟動。要改時間，在 `config.json` 加 `"idle_hours": 小時數`；設 `0` 就不自動結束。
+
 ### 資料放哪
 
 `~/.claude-inbox/`（可用環境變數 `CLAUDE_INBOX_HOME` 改）：
@@ -165,7 +167,7 @@ python3 /path/to/claude-inbox/inbox/inbox.py ask --title "..." --option "A=..." 
 |---|---|
 | `questions/*.json` | 題目，一題一檔 |
 | `events.jsonl` | 你的回答、送達紀錄、收起紀錄；平常只增不改，`inbox prune` 清理時才會改寫 |
-| `config.json` | 位址、埠、token |
+| `config.json` | 位址、埠、token、閒置幾小時自動結束 |
 | `sessions/` | 每個對話最後一次有動靜的時間（檔名是對話代號的雜湊，內容是空的） |
 
 題目與答案都是明文，不要放密碼或金鑰。
