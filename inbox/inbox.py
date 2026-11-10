@@ -4,7 +4,6 @@
 只用 Python 標準庫（3.9 以上）。資料放在 $CLAUDE_INBOX_HOME（預設 ~/.claude-inbox）。
 """
 import argparse
-import fcntl
 import hashlib
 import ipaddress
 import json
@@ -21,6 +20,14 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+try:
+    import fcntl
+except ImportError:  # 原生 Windows 沒有 fcntl
+    fcntl = None
+    import msvcrt
+
+IS_WINDOWS = os.name == 'nt'
+
 HERE = Path(__file__).resolve().parent
 PAGE = HERE / 'page.html'
 DEFAULT_PORT = 7799
@@ -31,6 +38,41 @@ KEEP_DAYS = 30  # 收起的題目留幾天（config 的 keep_days 可改，0 是
 PRUNE_EVERY_SECONDS = 24 * 3600
 TAILSCALE_NET = ipaddress.ip_network('100.64.0.0/10')  # Tailscale 的位址範圍，連線本身有加密
 TAKEOVER_HOURS = 24  # 出題的對話沒說自己結束、但這麼久沒動靜，就當它不在了（config 的 takeover_hours 可改）
+
+
+# ---------- 檔案鎖 ----------
+
+class FileLock:
+    """跨平台的獨佔檔案鎖：POSIX 用 flock，Windows 用 msvcrt.locking 鎖第一個位元組。
+
+    鎖的是獨立的 .lock 檔，不是資料檔本身：Windows 的鎖是強制的，鎖住資料檔會讓別的行程連讀都讀不了。
+    """
+
+    def __init__(self, path):
+        self.path = path
+
+    def __enter__(self):
+        self.fh = open(self.path, 'a+b')
+        if fcntl:
+            fcntl.flock(self.fh, fcntl.LOCK_EX)
+        else:
+            # msvcrt 的 LK_LOCK 只重試約 10 秒就丟 OSError，所以自己用 LK_NBLCK 輪詢到拿到為止
+            while True:
+                self.fh.seek(0)
+                try:
+                    msvcrt.locking(self.fh.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.05)
+        return self
+
+    def __exit__(self, *exc):
+        if fcntl:
+            fcntl.flock(self.fh, fcntl.LOCK_UN)
+        else:
+            self.fh.seek(0)
+            msvcrt.locking(self.fh.fileno(), msvcrt.LK_UNLCK, 1)
+        self.fh.close()
 
 
 # ---------- 路徑與設定 ----------
@@ -54,8 +96,7 @@ def load_config():
     path = home() / 'config.json'
     config = read_config(path)
     if not config.get('token'):
-        with open(home() / 'config.lock', 'a') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with FileLock(home() / 'config.lock'):
             config = read_config(path)  # 搶到鎖後重讀，別人可能已經產生過
             if not config.get('token'):
                 config['token'] = secrets.token_urlsafe(24)
@@ -211,14 +252,22 @@ class EventLog:
     """events.jsonl 的讀寫，全部包在同一把檔案鎖裡。"""
 
     def __enter__(self):
-        fd = os.open(events_path(), os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
-        self.fh = os.fdopen(fd, 'a+', encoding='utf-8')
-        fcntl.flock(self.fh, fcntl.LOCK_EX)
+        self.lock = FileLock(home() / 'events.lock').__enter__()
+        try:
+            fd = os.open(events_path(), os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
+            self.fh = os.fdopen(fd, 'a+', encoding='utf-8', newline='\n')  # 各平台都寫 LF
+            if fcntl:  # 舊版只鎖資料檔本身；升級途中舊版的服務可能還在跑，這把鎖也拿，兩邊才互斥
+                fcntl.flock(self.fh, fcntl.LOCK_EX)
+        except BaseException:
+            self.lock.__exit__(None, None, None)
+            raise
         return self
 
     def __exit__(self, *exc):
-        fcntl.flock(self.fh, fcntl.LOCK_UN)
+        if fcntl:
+            fcntl.flock(self.fh, fcntl.LOCK_UN)
         self.fh.close()
+        self.lock.__exit__(*exc)
 
     def read(self):
         self.fh.seek(0)
@@ -239,7 +288,7 @@ class EventLog:
         os.fsync(self.fh.fileno())
 
     def rewrite(self, events):
-        """整份換掉（清理用）。直接改寫原檔：換成新檔的話，正在等鎖的行程會寫到被換掉的舊檔。"""
+        """整份換掉（清理用）。直接改寫原檔：Windows 上別的行程開著檔案時換不掉，改寫原檔各平台都行。"""
         self.fh.seek(0)
         self.fh.truncate()
         self.append(events)

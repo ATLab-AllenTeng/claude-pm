@@ -282,6 +282,44 @@ class Delivery(Base):
         self.assertTrue(inbox.build_state()['questions'][0]['closed'])
 
 
+class Locking(Base):
+    def test_lock_keeps_two_processes_from_interleaving(self):
+        import subprocess
+        lock = inbox.home() / 'probe.lock'
+        log = inbox.home() / 'probe.log'
+        code = (
+            "import sys, time; sys.path.insert(0, sys.argv[1]); import inbox\n"
+            "for _ in range(20):\n"
+            "    with inbox.FileLock(sys.argv[2]):\n"
+            "        with open(sys.argv[3], 'a') as fh: fh.write('begin ' + sys.argv[4] + '\\n')\n"
+            "        time.sleep(0.002)\n"
+            "        with open(sys.argv[3], 'a') as fh: fh.write('end ' + sys.argv[4] + '\\n')\n"
+        )
+        src = str(Path(inbox.__file__).resolve().parent)
+        workers = [subprocess.Popen([sys.executable, '-c', code, src, str(lock), str(log), name])
+                   for name in ('a', 'b', 'c')]
+        for w in workers:
+            self.assertEqual(w.wait(timeout=60), 0)
+        lines = log.read_text().split()
+        pairs = list(zip(lines[0::2], lines[1::2]))
+        self.assertEqual(len(pairs), 120)  # 3 個行程 x 20 次 x（begin + end 各兩個字）
+        for i in range(0, len(lines), 4):  # 每個 begin 後面緊跟同一個行程的 end：沒有人插進來
+            self.assertEqual((lines[i], lines[i + 2]), ('begin', 'end'))
+            self.assertEqual(lines[i + 1], lines[i + 3])
+
+    def test_event_log_releases_lock_when_opening_fails(self):
+        with mock.patch.object(inbox.os, 'open', side_effect=OSError('開不了')):
+            with self.assertRaises(OSError):
+                inbox.EventLog().__enter__()
+        with inbox.EventLog() as log:  # 鎖有放掉，下一個人拿得到
+            self.assertEqual(log.read(), [])
+
+    def test_events_file_uses_lf_line_endings_everywhere(self):
+        qid = self.ask('--title', 't', '--option', 'A=甲')
+        self.answer(qid)
+        self.assertNotIn(b'\r', inbox.events_path().read_bytes())
+
+
 class Prune(Base):
     def close_at(self, qid, days_ago):
         when = (datetime.now().astimezone() - timedelta(days=days_ago)).isoformat(timespec='seconds')
