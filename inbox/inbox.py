@@ -154,7 +154,23 @@ def write_json(path, data):
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + '.')  # 預設權限 600
     with os.fdopen(fd, 'w', encoding='utf-8') as fh:
         fh.write(json.dumps(data, ensure_ascii=False, indent=2))
-    os.replace(tmp, path)
+    replace_file(tmp, path)
+
+
+def replace_file(tmp, path, attempts=80):
+    """把寫好的暫存檔換上去。Windows 上別的行程正開著目標檔時換不掉（PermissionError），
+    那只會持續讀一個小檔的時間，所以等一下再試；其他平台一次就成功。"""
+    for left in range(attempts - 1, -1, -1):
+        try:
+            return os.replace(tmp, path)
+        except PermissionError:
+            if not IS_WINDOWS or not left:
+                try:
+                    os.unlink(tmp)  # 換不上去就不要留下暫存檔
+                except OSError:
+                    pass
+                raise
+            time.sleep(0.025)
 
 
 def now_iso():
@@ -171,6 +187,11 @@ def project_of(cwd):
     except (OSError, subprocess.SubprocessError):
         pass
     return os.path.realpath(str(cwd))
+
+
+def same_project(a, b):
+    """兩個專案路徑是不是同一個。Windows 的路徑不分大小寫，磁碟代號也可能一個大寫一個小寫。"""
+    return bool(a) and bool(b) and os.path.normcase(a) == os.path.normcase(b)
 
 
 def base_url(config):
@@ -367,7 +388,7 @@ def deliverable(session_id, cwd, events=None, project=None):
     for q in build_state(events)['questions']:
         asker = q.get('session')
         own = bool(asker) and asker == session_id  # 出題的就是這個 session：不管現在在哪個資料夾
-        if not own and q.get('project') != project:
+        if not own and not same_project(q.get('project'), project):
             continue
         if not own and asker and not asker_gone(q, now, limit):
             continue  # 出題的對話還在：只有它自己能拿

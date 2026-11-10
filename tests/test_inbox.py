@@ -282,6 +282,39 @@ class Delivery(Base):
         self.assertTrue(inbox.build_state()['questions'][0]['closed'])
 
 
+class Files(Base):
+    def test_replace_retries_only_on_windows_and_cleans_up_when_it_gives_up(self):
+        target = inbox.home() / 'config.json'
+        calls = []
+
+        def busy_twice(src, dst):
+            calls.append(src)
+            if len(calls) < 3:
+                raise PermissionError('別的行程正開著')
+            return os.rename(src, dst)
+
+        with mock.patch.object(inbox, 'IS_WINDOWS', True), mock.patch.object(inbox.os, 'replace', busy_twice):
+            inbox.write_json(target, {'port': 1})
+        self.assertEqual(len(calls), 3)  # 前兩次被擋，第三次換上去
+        self.assertEqual(json.loads(target.read_text(encoding='utf-8')), {'port': 1})
+
+        always_busy = mock.Mock(side_effect=PermissionError('一直被佔著'))
+        with mock.patch.object(inbox, 'IS_WINDOWS', False), mock.patch.object(inbox.os, 'replace', always_busy):
+            with self.assertRaises(PermissionError):
+                inbox.write_json(target, {'port': 2})
+        self.assertEqual(always_busy.call_count, 1)  # 其他平台不重試
+        self.assertEqual([p.name for p in target.parent.glob('config.json.*')], [])  # 沒留下暫存檔
+        self.assertEqual(json.loads(target.read_text(encoding='utf-8')), {'port': 1})  # 原檔沒被動到
+
+    def test_project_paths_compare_the_way_the_platform_does(self):
+        self.assertTrue(inbox.same_project('/a/b', '/a/b'))
+        self.assertFalse(inbox.same_project('/a/b', '/a/c'))
+        self.assertFalse(inbox.same_project('', ''))  # 沒有專案資訊不算同一個
+        self.assertFalse(inbox.same_project(None, '/a/b'))
+        differs_by_case = inbox.same_project('C:\\Work\\Proj', 'c:\\work\\proj')
+        self.assertEqual(differs_by_case, os.name == 'nt')  # 只有 Windows 把大小寫不同當成同一個
+
+
 class Encoding(Base):
     def run_cli(self, *argv, stdin=b'', codepage='cp950'):
         """用真的子行程跑指令，並把 stdio 的預設編碼設成 Windows 繁中的碼頁，看輸出是不是仍然是 UTF-8。"""
@@ -627,7 +660,7 @@ class Server(Base):
             with mock.patch.object(inbox, 'command_line_of', return_value=line):
                 self.assertEqual(inbox.is_inbox_server(1234), expected, line)
         self.assertEqual(inbox.command_line_of(2 ** 22 + 12345), '')  # 不存在的 PID
-        self.assertIn('inbox', inbox.command_line_of(os.getpid()) + 'inbox')  # 查自己不會丟例外
+        self.assertIsInstance(inbox.command_line_of(os.getpid()), str)  # 查自己不會丟例外
 
     def test_stop_ends_real_server_and_server_removes_its_pid_file(self):
         port = free_port()
