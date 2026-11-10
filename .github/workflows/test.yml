@@ -1,0 +1,37 @@
+# 每次推送和每個 PR，在 Linux、macOS、Windows 上各跑一次測試。
+# 失敗的測試會寫成錯誤標註，直接顯示在 PR 的檢查結果上。
+name: 測試
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false   # 一個平台掛了，其他平台照樣跑完
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ['3.12']
+        include:
+          - os: ubuntu-latest
+            python: '3.9'    # 宣稱支援的最低版本
+          - os: windows-latest
+            python: '3.9'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: 跑測試
+        run: python .github/scripts/run_tests.py
