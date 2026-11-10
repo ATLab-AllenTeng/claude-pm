@@ -2,13 +2,13 @@
   "description": "把使用者在收件匣的新回覆帶進 agent 的上下文；對話結束時記一筆，讓它沒拿到的回覆能交給同專案的其他對話",
   "hooks": {
     "SessionStart": [
-      { "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/inbox/inbox.py\" hook", "timeout": 10 } ] }
+      { "hooks": [ { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/inbox\" hook", "timeout": 10 } ] }
     ],
     "UserPromptSubmit": [
-      { "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/inbox/inbox.py\" hook", "timeout": 10 } ] }
+      { "hooks": [ { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/inbox\" hook", "timeout": 10 } ] }
     ],
     "SessionEnd": [
-      { "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/inbox/inbox.py\" hook", "timeout": 10 } ] }
+      { "hooks": [ { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/inbox\" hook", "timeout": 10 } ] }
     ]
   }
 }

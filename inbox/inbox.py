@@ -4,7 +4,6 @@
 只用 Python 標準庫（3.9 以上）。資料放在 $CLAUDE_INBOX_HOME（預設 ~/.claude-inbox）。
 """
 import argparse
-import fcntl
 import hashlib
 import ipaddress
 import json
@@ -21,6 +20,14 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+try:
+    import fcntl
+except ImportError:  # 原生 Windows 沒有 fcntl
+    fcntl = None
+    import msvcrt
+
+IS_WINDOWS = os.name == 'nt'
+
 HERE = Path(__file__).resolve().parent
 PAGE = HERE / 'page.html'
 DEFAULT_PORT = 7799
@@ -31,6 +38,57 @@ KEEP_DAYS = 30  # 收起的題目留幾天（config 的 keep_days 可改，0 是
 PRUNE_EVERY_SECONDS = 24 * 3600
 TAILSCALE_NET = ipaddress.ip_network('100.64.0.0/10')  # Tailscale 的位址範圍，連線本身有加密
 TAKEOVER_HOURS = 24  # 出題的對話沒說自己結束、但這麼久沒動靜，就當它不在了（config 的 takeover_hours 可改）
+
+
+# ---------- 文字編碼 ----------
+
+def use_utf8_stdio():
+    """stdin／stdout／stderr 一律用 UTF-8。
+
+    Windows 預設是系統碼頁（繁中是 CP950）：hook 印出的中文進到 agent 會變亂碼，
+    碼頁裡沒有的字還會讓整個指令丟例外；hook 從 stdin 收到的 JSON 也會解錯。
+    """
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, 'reconfigure'):
+            try:
+                stream.reconfigure(encoding='utf-8')
+            except (ValueError, OSError):
+                pass
+
+
+# ---------- 檔案鎖 ----------
+
+class FileLock:
+    """跨平台的獨佔檔案鎖：POSIX 用 flock，Windows 用 msvcrt.locking 鎖第一個位元組。
+
+    鎖的是獨立的 .lock 檔，不是資料檔本身：Windows 的鎖是強制的，鎖住資料檔會讓別的行程連讀都讀不了。
+    """
+
+    def __init__(self, path):
+        self.path = path
+
+    def __enter__(self):
+        self.fh = open(self.path, 'a+b')
+        if fcntl:
+            fcntl.flock(self.fh, fcntl.LOCK_EX)
+        else:
+            # msvcrt 的 LK_LOCK 只重試約 10 秒就丟 OSError，所以自己用 LK_NBLCK 輪詢到拿到為止
+            while True:
+                self.fh.seek(0)
+                try:
+                    msvcrt.locking(self.fh.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.05)
+        return self
+
+    def __exit__(self, *exc):
+        if fcntl:
+            fcntl.flock(self.fh, fcntl.LOCK_UN)
+        else:
+            self.fh.seek(0)
+            msvcrt.locking(self.fh.fileno(), msvcrt.LK_UNLCK, 1)
+        self.fh.close()
 
 
 # ---------- 路徑與設定 ----------
@@ -54,8 +112,7 @@ def load_config():
     path = home() / 'config.json'
     config = read_config(path)
     if not config.get('token'):
-        with open(home() / 'config.lock', 'a') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with FileLock(home() / 'config.lock'):
             config = read_config(path)  # 搶到鎖後重讀，別人可能已經產生過
             if not config.get('token'):
                 config['token'] = secrets.token_urlsafe(24)
@@ -97,7 +154,23 @@ def write_json(path, data):
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + '.')  # 預設權限 600
     with os.fdopen(fd, 'w', encoding='utf-8') as fh:
         fh.write(json.dumps(data, ensure_ascii=False, indent=2))
-    os.replace(tmp, path)
+    replace_file(tmp, path)
+
+
+def replace_file(tmp, path, attempts=80):
+    """把寫好的暫存檔換上去。Windows 上別的行程正開著目標檔時換不掉（PermissionError），
+    那只會持續讀一個小檔的時間，所以等一下再試；其他平台一次就成功。"""
+    for left in range(attempts - 1, -1, -1):
+        try:
+            return os.replace(tmp, path)
+        except PermissionError:
+            if not IS_WINDOWS or not left:
+                try:
+                    os.unlink(tmp)  # 換不上去就不要留下暫存檔
+                except OSError:
+                    pass
+                raise
+            time.sleep(0.025)
 
 
 def now_iso():
@@ -107,12 +180,18 @@ def now_iso():
 def project_of(cwd):
     try:
         out = subprocess.run(['git', '-C', str(cwd), 'rev-parse', '--show-toplevel'],
-                             capture_output=True, text=True, timeout=5)
+                             capture_output=True, timeout=5,
+                             encoding='utf-8', errors='replace')  # git 印的是 UTF-8，不是系統碼頁
         if out.returncode == 0 and out.stdout.strip():
             return os.path.realpath(out.stdout.strip())
     except (OSError, subprocess.SubprocessError):
         pass
     return os.path.realpath(str(cwd))
+
+
+def same_project(a, b):
+    """兩個專案路徑是不是同一個。Windows 的路徑不分大小寫，磁碟代號也可能一個大寫一個小寫。"""
+    return bool(a) and bool(b) and os.path.normcase(a) == os.path.normcase(b)
 
 
 def base_url(config):
@@ -211,14 +290,22 @@ class EventLog:
     """events.jsonl 的讀寫，全部包在同一把檔案鎖裡。"""
 
     def __enter__(self):
-        fd = os.open(events_path(), os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
-        self.fh = os.fdopen(fd, 'a+', encoding='utf-8')
-        fcntl.flock(self.fh, fcntl.LOCK_EX)
+        self.lock = FileLock(home() / 'events.lock').__enter__()
+        try:
+            fd = os.open(events_path(), os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
+            self.fh = os.fdopen(fd, 'a+', encoding='utf-8', newline='\n')  # 各平台都寫 LF
+            if fcntl:  # 舊版只鎖資料檔本身；升級途中舊版的服務可能還在跑，這把鎖也拿，兩邊才互斥
+                fcntl.flock(self.fh, fcntl.LOCK_EX)
+        except BaseException:
+            self.lock.__exit__(None, None, None)
+            raise
         return self
 
     def __exit__(self, *exc):
-        fcntl.flock(self.fh, fcntl.LOCK_UN)
+        if fcntl:
+            fcntl.flock(self.fh, fcntl.LOCK_UN)
         self.fh.close()
+        self.lock.__exit__(*exc)
 
     def read(self):
         self.fh.seek(0)
@@ -239,7 +326,7 @@ class EventLog:
         os.fsync(self.fh.fileno())
 
     def rewrite(self, events):
-        """整份換掉（清理用）。直接改寫原檔：換成新檔的話，正在等鎖的行程會寫到被換掉的舊檔。"""
+        """整份換掉（清理用）。直接改寫原檔：Windows 上別的行程開著檔案時換不掉，改寫原檔各平台都行。"""
         self.fh.seek(0)
         self.fh.truncate()
         self.append(events)
@@ -301,7 +388,7 @@ def deliverable(session_id, cwd, events=None, project=None):
     for q in build_state(events)['questions']:
         asker = q.get('session')
         own = bool(asker) and asker == session_id  # 出題的就是這個 session：不管現在在哪個資料夾
-        if not own and q.get('project') != project:
+        if not own and not same_project(q.get('project'), project):
             continue
         if not own and asker and not asker_gone(q, now, limit):
             continue  # 出題的對話還在：只有它自己能拿
@@ -511,20 +598,25 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         Handler.last_request = time.time()
+        try:
+            length = int(self.headers.get('Content-Length') or 0)
+        except ValueError:
+            length = None
+        # 先把請求本文讀完再回錯誤：Windows 關掉還有未讀資料的連線會送 RST，
+        # 對方收不到 403／404，只看到連線被重設（WinError 10053／10054）。
+        raw = self.rfile.read(length) if length and 0 < length <= MAX_BODY else None
         if self.path != '/api/answer':
             return self.send_text(404, 'not found')
         if not self.check(api=True):
             return
         if not self.headers.get('Content-Type', '').startswith('application/json'):
             return self.send_text(415, '只收 JSON')
-        try:
-            length = int(self.headers.get('Content-Length') or 0)
-        except ValueError:
+        if length is None:
             return self.send_text(400, 'Content-Length 不是數字')
-        if length <= 0 or length > MAX_BODY:
+        if raw is None:
             return self.send_text(413, '內容太大或是空的')
         try:
-            payload = json.loads(self.rfile.read(length).decode('utf-8'))
+            payload = json.loads(raw.decode('utf-8'))
             with EventLog() as log:  # 檢查和寫入在同一把鎖裡：連點兩下也只會存一則
                 questions = {q['id']: q for q in build_state(log.read())['questions']}
                 events = validate_answers(payload, questions)
@@ -532,6 +624,22 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             return self.send_text(400, str(exc))
         self.send_text(200, json.dumps({'stored': len(events)}), 'application/json')
+
+
+class InboxServer(ThreadingHTTPServer):
+    """Windows 上不能沿用預設的 SO_REUSEADDR：那裡它允許兩個行程同時綁同一個埠，
+    兩個服務會一起活著、輪流接請求。改成獨佔，搶輸的那個照樣綁不到就結束。"""
+    allow_reuse_address = not IS_WINDOWS
+
+    def server_bind(self):
+        import socketserver
+        if IS_WINDOWS:
+            import socket
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        # 不走 HTTPServer.server_bind：它會用 getfqdn 反查主機名稱，macOS 上可能卡十幾秒，
+        # 出題的那一方等不到服務就會回報「服務沒起來」。查到的名稱我們也用不到。
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 def idle_too_long(last_request, now, idle_seconds, waiting):
@@ -555,7 +663,14 @@ def watch_idle(server, idle_seconds):
 def serve(config):
     Handler.config = config
     Handler.last_request = time.time()
-    server = ThreadingHTTPServer((config['host'], config['port']), Handler)
+    try:
+        server = InboxServer((config['host'], config['port']), Handler)
+    except PermissionError:
+        if IS_WINDOWS:  # WinError 10013：埠落在 Hyper-V／WSL／Docker 保留的範圍，沒人在用也綁不到
+            print('綁不到埠 %s：可能在 Windows 保留的範圍裡（用 netsh interface ipv4 show '
+                  'excludedportrange protocol=tcp 查）。請在 %s 換一個 port。'
+                  % (config['port'], home() / 'config.json'), flush=True)
+        raise
     pidfile = home() / 'server.pid'
     pidfile.write_text(str(os.getpid()))  # 綁埠成功才寫：搶輸的不會蓋掉活著的那個
     print('收件匣服務已啟動：' + base_url(config), flush=True)  # 服務的 log 不放 token
@@ -603,10 +718,21 @@ def server_alive(config):
 def ensure_server(config):
     if server_alive(config):
         return True
-    log = open(home() / 'server.log', 'a')
-    subprocess.Popen([sys.executable, str(Path(__file__).resolve()), 'serve'],
-                            stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                            start_new_session=True)
+    command = [sys.executable, str(Path(__file__).resolve()), 'serve']
+    # 工作目錄放在資料夾裡，不要留在出題當下的專案：Windows 上行程的工作目錄會被佔住，
+    # 服務活著的期間那個專案資料夾刪不掉也改不了名。
+    where = str(home())
+    # 子行程拿到自己的那份 handle；這邊用完就關，否則 Windows 上 server.log 會一直被佔著、刪不掉
+    with open(home() / 'server.log', 'a', encoding='utf-8') as log:
+        if IS_WINDOWS:
+            # 脫離目前的主控台：不跳視窗，hook 或終端機結束時也不會被一起帶走
+            flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                     | subprocess.CREATE_NO_WINDOW)
+            subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=log, cwd=where,
+                             creationflags=flags, close_fds=True)
+        else:
+            subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=log, cwd=where,
+                             start_new_session=True)
     for _ in range(20):
         time.sleep(0.2)
         if server_alive(config):
@@ -680,7 +806,8 @@ def cmd_wait(args):
 def cmd_hook(args):
     """給 Claude Code hook 用：stdin 是 hook 的 JSON，stdout 會進 agent 的上下文。"""
     try:
-        data = json.loads(sys.stdin.read() or '{}')
+        # Windows PowerShell 5.1 寫 stdin 會先送一個 BOM，json.loads 遇到會失敗
+        data = json.loads(sys.stdin.read().lstrip('\ufeff') or '{}')
     except ValueError:
         data = {}
     session = data.get('session_id', '')
@@ -701,13 +828,23 @@ def cmd_list(args):
 
 def is_inbox_server(pid):
     """這個 PID 是不是收件匣服務。PID 檔可能是舊的（例如重開機後號碼被別的程式拿去用）。"""
+    words = command_line_of(pid).replace('"', ' ').split()
+    return 'serve' in words and any(w.endswith('inbox.py') for w in words)
+
+
+def command_line_of(pid):
+    """那個 PID 的完整命令列；查不到（行程不在了、沒權限、工具不存在）回空字串。"""
+    if IS_WINDOWS:  # Windows 沒有 ps；tasklist 只給程式名，要命令列得問 CIM
+        query = "(Get-CimInstance Win32_Process -Filter 'ProcessId=%d').CommandLine" % int(pid)
+        command = ['powershell', '-NoProfile', '-NonInteractive', '-Command', query]
+    else:
+        command = ['ps', '-p', str(int(pid)), '-o', 'command=']
     try:
-        out = subprocess.run(['ps', '-p', str(pid), '-o', 'command='],
-                             capture_output=True, text=True, timeout=5)
+        out = subprocess.run(command, capture_output=True, timeout=20, stdin=subprocess.DEVNULL,
+                             encoding='utf-8', errors='replace')
     except (OSError, subprocess.SubprocessError):
-        return False
-    words = out.stdout.split()
-    return out.returncode == 0 and 'serve' in words and any(w.endswith('inbox.py') for w in words)
+        return ''
+    return out.stdout.strip() if out.returncode == 0 else ''
 
 
 def cmd_prune(args):
@@ -745,10 +882,10 @@ def cmd_stop(args):
             print('已停止')
         else:
             print('服務本來就沒在跑')  # 不是我們的服務就不碰它
-    except (ProcessLookupError, ValueError):
-        print('服務本來就沒在跑')
     except PermissionError:
         print('沒有權限停止 PID 檔記的那個程式，沒動它')
+    except (OSError, ValueError):  # 行程剛好不在了：POSIX 是 ProcessLookupError，Windows 是一般的 OSError
+        print('服務本來就沒在跑')
     pidfile.unlink(missing_ok=True)
 
 
@@ -784,6 +921,7 @@ def main(argv=None):
     sub.add_parser('start', help='背景啟動網頁服務').set_defaults(func=cmd_start)
     sub.add_parser('stop', help='停止背景服務').set_defaults(func=cmd_stop)
     sub.add_parser('url', help='印出網址').set_defaults(func=cmd_url)
+    use_utf8_stdio()
     args = parser.parse_args(argv)
     args.func(args)
 

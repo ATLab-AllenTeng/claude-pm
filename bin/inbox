@@ -1,3 +1,16 @@
 #!/bin/sh
-# 收件匣指令入口：plugin 啟用時 Claude Code 會把 bin/ 放進 PATH。
-exec python3 "$(dirname "$0")/../inbox/inbox.py" "$@"
+# 收件匣指令入口：plugin 啟用時 Claude Code 會把 bin/ 放進 PATH；hook 也從這裡進來。
+# 不能直接寫死 python3：Windows 的 python3 常是 Microsoft Store 的捷徑，檔案存在但不能執行，
+# 所以每個候選都先試跑一次，能跑的才用。
+script="$(dirname "$0")/../inbox/inbox.py"
+if python3 -c '' >/dev/null 2>&1; then
+  exec python3 "$script" "$@"
+fi
+if python -c 'import sys; sys.exit(sys.version_info < (3, 9))' >/dev/null 2>&1; then
+  exec python "$script" "$@"
+fi
+if py -3 -c '' >/dev/null 2>&1; then
+  exec py -3 "$script" "$@"
+fi
+echo "inbox：找不到可以執行的 Python 3.9 以上（試過 python3、python、py -3）" >&2
+exit 127

@@ -32,7 +32,7 @@ inbox ask --title "登入頁要不要保留舊的帳密登入？" \
 
 出題後指令會印出題號和網址。第一次出題時會自動在背景起網頁服務。
 
-如果 `inbox` 指令找不到，改用 `python3 "${CLAUDE_PLUGIN_ROOT}/inbox/inbox.py"`，後面參數一樣。
+如果 `inbox` 指令找不到，改用 `python3 "${CLAUDE_PLUGIN_ROOT}/inbox/inbox.py"`（Windows 上 `python3` 不能執行時改用 `python`），後面參數一樣。
 
 ## 專案已有自己的規則時
 

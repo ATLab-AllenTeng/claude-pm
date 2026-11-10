@@ -47,7 +47,27 @@ class Base(unittest.TestCase):
         self.no_server.stop()
         os.chdir(self.cwd)
         self.env.stop()
-        self.tmp.cleanup()
+        # Windows：剛被停掉的背景服務要過一下才放開 server.log，資料夾這時還刪不掉
+        for left in range(119, -1, -1):
+            try:
+                self.tmp.cleanup()
+                break
+            except OSError:
+                if not left:
+                    raise
+                time.sleep(0.025)
+
+    def assertMode(self, path, mode):
+        # Windows 沒有 POSIX 權限位元（st_mode 一律是 0o666／0o777），保護靠使用者資料夾的存取控制
+        if os.name != 'nt':
+            self.assertEqual(oct(Path(path).stat().st_mode & 0o777), mode)
+
+    @staticmethod
+    def kill_quietly(pid):
+        try:
+            os.kill(int(pid), 15)
+        except (OSError, ValueError):  # 已經不在了：POSIX 是 ProcessLookupError，Windows 是一般的 OSError
+            pass
 
     def ask(self, *argv):
         with redirect_stdout(io.StringIO()) as out:
@@ -224,7 +244,7 @@ class Delivery(Base):
         inbox.touch_session('sess-9')
         folder = Path(os.environ['CLAUDE_INBOX_HOME']) / 'sessions'
         self.assertEqual(len(list(folder.iterdir())), 1)
-        self.assertEqual(oct(folder.stat().st_mode & 0o777), '0o700')
+        self.assertMode(folder, '0o700')
         self.assertGreater(inbox.last_seen('sess-9'), 0)
 
     def test_hook_reads_stdin_and_prints_answers(self):
@@ -280,6 +300,150 @@ class Delivery(Base):
             inbox.main(['list'])
         self.assertNotIn('要收的題', out.getvalue())
         self.assertTrue(inbox.build_state()['questions'][0]['closed'])
+
+
+class EntryPoints(Base):
+    ROOT = Path(inbox.__file__).resolve().parent.parent
+
+    def run_entry(self, command, stdin=b''):
+        import subprocess
+        return subprocess.run(command, input=stdin, capture_output=True, cwd=str(self.project), timeout=120)
+
+    def test_hooks_all_go_through_the_sh_entry_point(self):
+        hooks = json.loads((self.ROOT / 'hooks' / 'hooks.json').read_text(encoding='utf-8'))['hooks']
+        self.assertEqual(sorted(hooks), ['SessionEnd', 'SessionStart', 'UserPromptSubmit'])
+        for event, groups in hooks.items():
+            command = groups[0]['hooks'][0]['command']
+            self.assertEqual(command, 'sh "${CLAUDE_PLUGIN_ROOT}/bin/inbox" hook', event)
+        self.assertNotIn(b'\r', (self.ROOT / 'bin' / 'inbox').read_bytes())  # sh 腳本不能有 CRLF
+
+    def test_sh_entry_point_runs_commands_and_hook(self):
+        import shutil
+        sh = shutil.which('sh')
+        if not sh:
+            self.skipTest('這台機器沒有 sh（Windows 上沒裝 Git for Windows）')
+        qid = self.ask('--title', '問題標題', '--option', 'A=甲')
+        self.answer(qid)
+        entry = str(self.ROOT / 'bin' / 'inbox')
+        listed = self.run_entry([sh, entry, 'list'])
+        self.assertEqual(listed.returncode, 0, listed.stderr.decode('utf-8', 'replace'))
+        self.assertIn('問題標題', listed.stdout.decode('utf-8'))
+        payload = json.dumps({'hook_event_name': 'UserPromptSubmit', 'session_id': 'sess-1',
+                              'cwd': str(self.project)}).encode('utf-8')
+        hooked = self.run_entry([sh, entry, 'hook'], stdin=payload)
+        self.assertEqual(hooked.returncode, 0, hooked.stderr.decode('utf-8', 'replace'))
+        self.assertIn('使用者選：A 甲', hooked.stdout.decode('utf-8'))
+
+    @unittest.skipUnless(os.name == 'nt', '只有 Windows 有 cmd')
+    def test_cmd_entry_point_runs_on_windows(self):
+        self.ask('--title', '問題標題')
+        listed = self.run_entry(['cmd', '/c', str(self.ROOT / 'bin' / 'inbox.cmd'), 'list'])
+        self.assertEqual(listed.returncode, 0, listed.stderr.decode('utf-8', 'replace'))
+        self.assertIn('問題標題', listed.stdout.decode('utf-8'))
+
+
+class Files(Base):
+    def test_replace_retries_only_on_windows_and_cleans_up_when_it_gives_up(self):
+        target = inbox.home() / 'config.json'
+        calls = []
+
+        def busy_twice(src, dst):
+            calls.append(src)
+            if len(calls) < 3:
+                raise PermissionError('別的行程正開著')
+            return os.rename(src, dst)
+
+        with mock.patch.object(inbox, 'IS_WINDOWS', True), mock.patch.object(inbox.os, 'replace', busy_twice):
+            inbox.write_json(target, {'port': 1})
+        self.assertEqual(len(calls), 3)  # 前兩次被擋，第三次換上去
+        self.assertEqual(json.loads(target.read_text(encoding='utf-8')), {'port': 1})
+
+        always_busy = mock.Mock(side_effect=PermissionError('一直被佔著'))
+        with mock.patch.object(inbox, 'IS_WINDOWS', False), mock.patch.object(inbox.os, 'replace', always_busy):
+            with self.assertRaises(PermissionError):
+                inbox.write_json(target, {'port': 2})
+        self.assertEqual(always_busy.call_count, 1)  # 其他平台不重試
+        self.assertEqual([p.name for p in target.parent.glob('config.json.*')], [])  # 沒留下暫存檔
+        self.assertEqual(json.loads(target.read_text(encoding='utf-8')), {'port': 1})  # 原檔沒被動到
+
+    def test_project_paths_compare_the_way_the_platform_does(self):
+        self.assertTrue(inbox.same_project('/a/b', '/a/b'))
+        self.assertFalse(inbox.same_project('/a/b', '/a/c'))
+        self.assertFalse(inbox.same_project('', ''))  # 沒有專案資訊不算同一個
+        self.assertFalse(inbox.same_project(None, '/a/b'))
+        differs_by_case = inbox.same_project('C:\\Work\\Proj', 'c:\\work\\proj')
+        self.assertEqual(differs_by_case, os.name == 'nt')  # 只有 Windows 把大小寫不同當成同一個
+
+
+class Encoding(Base):
+    def run_cli(self, *argv, stdin=b'', codepage='cp950'):
+        """用真的子行程跑指令，並把 stdio 的預設編碼設成 Windows 繁中的碼頁，看輸出是不是仍然是 UTF-8。"""
+        import subprocess
+        env = dict(os.environ, PYTHONIOENCODING=codepage, PYTHONUTF8='0')
+        return subprocess.run([sys.executable, str(Path(inbox.__file__).resolve()), *argv],
+                              input=stdin, capture_output=True, env=env, cwd=str(self.project), timeout=60)
+
+    def test_hook_output_is_utf8_even_when_console_codepage_is_not(self):
+        qid = self.ask('--title', '要不要上線？🚀', '--option', 'A=上線')  # 表情符號不在 CP950 裡
+        self.answer(qid, 'A', '補充說明')
+        payload = json.dumps({'hook_event_name': 'UserPromptSubmit', 'session_id': 'sess-1',
+                              'cwd': str(self.project)}).encode('utf-8')
+        done = self.run_cli('hook', stdin=payload)
+        self.assertEqual(done.returncode, 0, done.stderr.decode('utf-8', 'replace'))
+        text = done.stdout.decode('utf-8')  # 不是 UTF-8 的話這裡就會丟例外
+        self.assertIn('要不要上線？🚀', text)
+        self.assertIn('補充：補充說明', text)
+
+    def test_hook_accepts_stdin_that_starts_with_a_bom(self):
+        qid = self.ask('--title', '問題標題', '--option', 'A=甲')
+        self.answer(qid)
+        payload = json.dumps({'session_id': 'sess-1', 'cwd': str(self.project)}).encode('utf-8')
+        done = self.run_cli('hook', stdin=b'\xef\xbb\xbf' + payload)
+        self.assertIn('問題標題', done.stdout.decode('utf-8'))
+
+    def test_list_prints_non_ascii_titles_as_utf8(self):
+        self.ask('--title', '標題 ✓')
+        done = self.run_cli('list')
+        self.assertEqual(done.returncode, 0, done.stderr.decode('utf-8', 'replace'))
+        self.assertIn('標題 ✓', done.stdout.decode('utf-8'))
+
+
+class Locking(Base):
+    def test_lock_keeps_two_processes_from_interleaving(self):
+        import subprocess
+        lock = inbox.home() / 'probe.lock'
+        log = inbox.home() / 'probe.log'
+        code = (
+            "import sys, time; sys.path.insert(0, sys.argv[1]); import inbox\n"
+            "for _ in range(20):\n"
+            "    with inbox.FileLock(sys.argv[2]):\n"
+            "        with open(sys.argv[3], 'a') as fh: fh.write('begin ' + sys.argv[4] + '\\n')\n"
+            "        time.sleep(0.002)\n"
+            "        with open(sys.argv[3], 'a') as fh: fh.write('end ' + sys.argv[4] + '\\n')\n"
+        )
+        src = str(Path(inbox.__file__).resolve().parent)
+        workers = [subprocess.Popen([sys.executable, '-c', code, src, str(lock), str(log), name])
+                   for name in ('a', 'b', 'c')]
+        for w in workers:
+            self.assertEqual(w.wait(timeout=60), 0)
+        lines = log.read_text().split()
+        pairs = list(zip(lines[0::2], lines[1::2]))
+        self.assertEqual(len(pairs), 120)  # 3 個行程 x 20 次 x（begin + end 各兩個字）
+        for i in range(0, len(lines), 4):  # 每個 begin 後面緊跟同一個行程的 end：沒有人插進來
+            self.assertEqual((lines[i], lines[i + 2]), ('begin', 'end'))
+            self.assertEqual(lines[i + 1], lines[i + 3])
+
+    def test_event_log_releases_lock_when_opening_fails(self):
+        with mock.patch.object(inbox.os, 'open', side_effect=OSError('開不了')):
+            with self.assertRaises(OSError):
+                inbox.EventLog().__enter__()
+        with inbox.EventLog() as log:  # 鎖有放掉，下一個人拿得到
+            self.assertEqual(log.read(), [])
+
+    def test_events_file_uses_lf_line_endings_everywhere(self):
+        qid = self.ask('--title', 't', '--option', 'A=甲')
+        self.answer(qid)
+        self.assertNotIn(b'\r', inbox.events_path().read_bytes())
 
 
 class Prune(Base):
@@ -365,15 +529,16 @@ class Prune(Base):
         qid = self.ask('--title', '新題', '--option', 'A=甲')
         self.answer(qid)
         self.assertEqual(len(inbox.take('sess-1', str(self.project))), 1)
-        self.assertEqual(oct(inbox.events_path().stat().st_mode & 0o777), '0o600')
+        self.assertMode(inbox.events_path(), '0o600')
 
 
 class Server(Base):
     def start(self, host='127.0.0.1', token=''):
         port = free_port()
         inbox.Handler.config = {'host': host, 'port': port, 'token': token}
-        httpd = ThreadingHTTPServer((host, port), inbox.Handler)
+        httpd = inbox.InboxServer((host, port), inbox.Handler)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
         self.addCleanup(httpd.shutdown)
         return port
 
@@ -464,6 +629,24 @@ class Server(Base):
             seen.append(nonce)
         self.assertNotEqual(seen[0], seen[1])  # 每次回應換一個
 
+    def test_error_reply_still_arrives_when_request_has_a_body(self):
+        port = self.start(token='secret-token')
+        body = {'answers': [{'question_id': 'x', 'choice': 'A', 'text': 'y' * 2000}]}
+        self.assertEqual(self.req(port, '/api/nope', body)[0], 404)  # 路徑不對
+        self.assertEqual(self.req(port, '/api/answer', body)[0], 401)  # 沒帶 token
+        self.assertEqual(self.req(port, '/api/answer', body, headers={'Origin': 'http://evil.example'})[0], 403)
+
+    def test_server_starts_without_reverse_dns_lookup(self):
+        import socket
+        with mock.patch.object(socket, 'getfqdn', side_effect=AssertionError('不該反查主機名稱')):
+            port = self.start()
+        self.assertEqual(self.req(port, '/')[0], 200)
+
+    def test_second_server_cannot_bind_a_port_that_is_in_use(self):
+        port = self.start()
+        with self.assertRaises(OSError):
+            inbox.InboxServer(('127.0.0.1', port), inbox.Handler)
+
     def test_token_required_when_configured(self):
         port = self.start(token='secret-token')
         self.assertEqual(self.req(port, '/api/state')[0], 401)
@@ -508,28 +691,53 @@ class Server(Base):
         try:
             with mock.patch.object(inbox, 'ensure_server', REAL_ENSURE_SERVER):
                 self.assertTrue(inbox.ensure_server(config))
-            log = (Path(os.environ['CLAUDE_INBOX_HOME']) / 'server.log').read_text()
+            log = (Path(os.environ['CLAUDE_INBOX_HOME']) / 'server.log').read_text(encoding='utf-8')
             self.assertIn('收件匣服務已啟動', log)
             self.assertNotIn(config['token'], log)
         finally:  # 必須在測試本體清：tearDown 會先刪掉暫存資料夾與 PID 檔
             if pid_file.exists():
-                try:
-                    os.kill(int(pid_file.read_text()), signal.SIGTERM)
-                except (ProcessLookupError, ValueError):
-                    pass
+                self.kill_quietly(pid_file.read_text())
+
+    def test_background_server_does_not_sit_in_the_project_folder(self):
+        with mock.patch.object(inbox.subprocess, 'Popen') as popen, \
+                mock.patch.object(inbox, 'server_alive', side_effect=[False, True]), \
+                mock.patch.object(inbox, 'ensure_server', REAL_ENSURE_SERVER):
+            self.assertTrue(inbox.ensure_server({'host': '127.0.0.1', 'port': 1, 'token': 't'}))
+        where = popen.call_args.kwargs['cwd']
+        self.assertEqual(os.path.realpath(where), os.path.realpath(str(inbox.home())))
+        self.assertNotEqual(os.path.realpath(where), os.path.realpath(os.getcwd()))  # 不是出題當下的專案
 
     def test_stop_leaves_unrelated_process_alone_when_pid_file_is_stale(self):
         import subprocess
-        bystander = subprocess.Popen(['sleep', '30'])
-        self.addCleanup(bystander.kill)
-        pid_file = inbox.home() / 'server.pid'
-        pid_file.write_text(str(bystander.pid))  # 舊 PID 檔，號碼已經是別的程式的
-        with redirect_stdout(io.StringIO()) as out:
-            inbox.main(['stop'])
-        self.assertIn('本來就沒在跑', out.getvalue())
-        time.sleep(0.2)
-        self.assertIsNone(bystander.poll())  # 沒被誤殺
-        self.assertFalse(pid_file.exists())
+        # 工作目錄放在暫存資料夾外面：Windows 上行程會佔住自己的工作目錄，收尾時會刪不掉
+        bystander = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+                                     cwd=tempfile.gettempdir())
+        try:
+            pid_file = inbox.home() / 'server.pid'
+            pid_file.write_text(str(bystander.pid))  # 舊 PID 檔，號碼已經是別的程式的
+            with redirect_stdout(io.StringIO()) as out:
+                inbox.main(['stop'])
+            self.assertIn('本來就沒在跑', out.getvalue())
+            time.sleep(0.2)
+            self.assertIsNone(bystander.poll())  # 沒被誤殺
+            self.assertFalse(pid_file.exists())
+        finally:
+            bystander.kill()
+            bystander.wait(timeout=10)
+
+    def test_command_line_check_handles_quotes_spaces_and_missing_process(self):
+        cases = {
+            '/usr/bin/python3 /home/me/plugins/inbox/inbox.py serve': True,
+            '"C:\\Program Files\\Python312\\python.exe" "C:\\Users\\me\\my plugins\\inbox\\inbox.py" serve': True,
+            '/usr/bin/python3 /home/me/plugins/inbox/inbox.py wait --timeout 1800': False,  # 不是服務
+            'sleep 30': False,
+            '': False,  # 查不到
+        }
+        for line, expected in cases.items():
+            with mock.patch.object(inbox, 'command_line_of', return_value=line):
+                self.assertEqual(inbox.is_inbox_server(1234), expected, line)
+        self.assertEqual(inbox.command_line_of(2 ** 22 + 12345), '')  # 不存在的 PID
+        self.assertIsInstance(inbox.command_line_of(os.getpid()), str)  # 查自己不會丟例外
 
     def test_stop_ends_real_server_and_server_removes_its_pid_file(self):
         port = free_port()
@@ -551,10 +759,7 @@ class Server(Base):
                 time.sleep(0.2)
             self.assertFalse(inbox.server_alive(config))
         finally:
-            try:
-                os.kill(pid, 15)
-            except ProcessLookupError:
-                pass
+            self.kill_quietly(pid)
 
     def test_idle_rule_needs_no_waiting_question_and_a_long_quiet_period(self):
         hour = 3600
@@ -585,13 +790,13 @@ class Server(Base):
         config = inbox.load_config()
         path = Path(os.environ['CLAUDE_INBOX_HOME']) / 'config.json'
         self.assertTrue(config['token'])
-        self.assertEqual(oct(path.stat().st_mode & 0o777), '0o600')
-        self.assertEqual(oct(path.parent.stat().st_mode & 0o777), '0o700')
+        self.assertMode(path, '0o600')
+        self.assertMode(path.parent, '0o700')
         self.assertEqual(inbox.load_config()['token'], config['token'])  # 第二次不重產
         qid = self.ask('--title', 't')
         self.answer(qid, choice='', text='x')
-        self.assertEqual(oct(inbox.events_path().stat().st_mode & 0o777), '0o600')
-        self.assertEqual(oct((path.parent / 'questions').stat().st_mode & 0o777), '0o700')
+        self.assertMode(inbox.events_path(), '0o600')
+        self.assertMode((path.parent / 'questions'), '0o700')
 
     def test_plain_http_warning_only_outside_loopback_and_tailscale(self):
         from contextlib import redirect_stderr
@@ -618,7 +823,7 @@ class Server(Base):
         path.write_text(json.dumps({'host': '100.64.0.1'}))
         config = inbox.load_config()
         self.assertTrue(config['token'])
-        self.assertEqual(oct(path.stat().st_mode & 0o777), '0o600')
+        self.assertMode(path, '0o600')
         self.assertIn('?t=' + config['token'], inbox.page_url(config))
 
 

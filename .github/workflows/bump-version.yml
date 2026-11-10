@@ -19,7 +19,7 @@ jobs:
   bump:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: main        # 拿 main 最新的狀態，而不是觸發這次執行的那個 commit
           fetch-depth: 0   # 要讀得到推送之前的 commit
