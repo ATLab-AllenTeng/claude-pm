@@ -367,9 +367,25 @@ class Handler(BaseHTTPRequestHandler):
 def serve(config):
     Handler.config = config
     server = ThreadingHTTPServer((config['host'], config['port']), Handler)
-    (home() / 'server.pid').write_text(str(os.getpid()))  # 綁埠成功才寫：搶輸的不會蓋掉活著的那個
+    pidfile = home() / 'server.pid'
+    pidfile.write_text(str(os.getpid()))  # 綁埠成功才寫：搶輸的不會蓋掉活著的那個
     print('收件匣服務已啟動：' + base_url(config), flush=True)  # 服務的 log 不放 token
-    server.serve_forever()
+
+    def on_term(signum, frame):
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, on_term)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        try:  # 結束時收掉自己的 PID 檔；已經被別的服務換掉就不動
+            if pidfile.read_text().strip() == str(os.getpid()):
+                pidfile.unlink()
+        except OSError:
+            pass
 
 
 def server_alive(config):
@@ -471,16 +487,33 @@ def cmd_list(args):
         print('%s  %s  %s  （%s）' % (q['id'], status, q['title'], q['from']))
 
 
+def is_inbox_server(pid):
+    """這個 PID 是不是收件匣服務。PID 檔可能是舊的（例如重開機後號碼被別的程式拿去用）。"""
+    try:
+        out = subprocess.run(['ps', '-p', str(pid), '-o', 'command='],
+                             capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    words = out.stdout.split()
+    return out.returncode == 0 and 'serve' in words and any(w.endswith('inbox.py') for w in words)
+
+
 def cmd_stop(args):
     pidfile = home() / 'server.pid'
     if not pidfile.exists():
         return print('沒有記錄中的服務')
     try:
-        os.kill(int(pidfile.read_text()), signal.SIGTERM)
-        print('已停止')
+        pid = int(pidfile.read_text())
+        if is_inbox_server(pid):
+            os.kill(pid, signal.SIGTERM)
+            print('已停止')
+        else:
+            print('服務本來就沒在跑')  # 不是我們的服務就不碰它
     except (ProcessLookupError, ValueError):
         print('服務本來就沒在跑')
-    pidfile.unlink()
+    except PermissionError:
+        print('沒有權限停止 PID 檔記的那個程式，沒動它')
+    pidfile.unlink(missing_ok=True)
 
 
 def main(argv=None):

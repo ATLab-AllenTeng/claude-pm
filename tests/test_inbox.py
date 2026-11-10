@@ -316,6 +316,44 @@ class Server(Base):
                 except (ProcessLookupError, ValueError):
                     pass
 
+    def test_stop_leaves_unrelated_process_alone_when_pid_file_is_stale(self):
+        import subprocess
+        bystander = subprocess.Popen(['sleep', '30'])
+        self.addCleanup(bystander.kill)
+        pid_file = inbox.home() / 'server.pid'
+        pid_file.write_text(str(bystander.pid))  # 舊 PID 檔，號碼已經是別的程式的
+        with redirect_stdout(io.StringIO()) as out:
+            inbox.main(['stop'])
+        self.assertIn('本來就沒在跑', out.getvalue())
+        time.sleep(0.2)
+        self.assertIsNone(bystander.poll())  # 沒被誤殺
+        self.assertFalse(pid_file.exists())
+
+    def test_stop_ends_real_server_and_server_removes_its_pid_file(self):
+        port = free_port()
+        inbox.home()
+        (Path(os.environ['CLAUDE_INBOX_HOME']) / 'config.json').write_text(json.dumps({'port': port}))
+        config = inbox.load_config()
+        pid_file = Path(os.environ['CLAUDE_INBOX_HOME']) / 'server.pid'
+        with mock.patch.object(inbox, 'ensure_server', REAL_ENSURE_SERVER):
+            self.assertTrue(inbox.ensure_server(config))
+        pid = int(pid_file.read_text())
+        try:
+            self.assertTrue(inbox.is_inbox_server(pid))
+            with redirect_stdout(io.StringIO()) as out:
+                inbox.main(['stop'])
+            self.assertIn('已停止', out.getvalue())
+            for _ in range(25):
+                if not inbox.server_alive(config):
+                    break
+                time.sleep(0.2)
+            self.assertFalse(inbox.server_alive(config))
+        finally:
+            try:
+                os.kill(pid, 15)
+            except ProcessLookupError:
+                pass
+
     def test_loopback_default_also_gets_private_token_and_folder(self):
         old = os.umask(0o022)  # 在寬鬆的 umask 下測，權限被放寬時才會變紅
         self.addCleanup(os.umask, old)
