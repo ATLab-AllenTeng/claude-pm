@@ -457,6 +457,10 @@ def format_answers(pairs):
     lines = ['收件匣：使用者回覆了 %d 則。' % len(pairs)]
     for q, a in pairs:
         lines.append('')
+        if q.get('kind') == 'report':
+            lines.append('【%s】完成摘要：%s' % (q['id'], q['title']))
+            lines.append('使用者看完這則摘要，有意見：' + a.get('text', ''))
+            continue
         lines.append('【%s】%s' % (q['id'], q['title']))
         if a.get('choice') == 'ack':
             lines.append('使用者：我知道了')
@@ -465,7 +469,10 @@ def format_answers(pairs):
         if a.get('text'):
             lines.append('補充：' + a['text'])
     lines.append('')
-    lines.append('照回覆繼續做；這件處理完可跑 inbox close <題號> 把它收起來。')
+    if any(q.get('kind') != 'report' for q, _ in pairs):
+        lines.append('照回覆繼續做；這件處理完可跑 inbox close <題號> 把它收起來。')
+    else:
+        lines.append('照意見處理；摘要本身已經從使用者的畫面刪掉，不用再收。')
     return '\n'.join(lines)
 
 
@@ -487,7 +494,38 @@ def take(session_id, cwd, emit=None, project=None):
             emit(pairs)
         log.append([{'event_id': str(uuid.uuid4()), 'kind': 'delivered', 'ref': a['event_id'],
                      'session': session_id, 'at': now_iso()} for _, a in pairs])
+        # 完成摘要讀完就不留：意見已經交給 agent，這則摘要連同紀錄一起刪掉
+        remove_questions(log, {q['id'] for q, _ in pairs if q.get('kind') == 'report'})
     return pairs
+
+
+def remove_file(path, attempts=40):
+    """刪檔。Windows 上別的行程正讀著時刪不掉，那只有一瞬間，等一下再試。"""
+    for left in range(attempts - 1, -1, -1):
+        try:
+            return path.unlink(missing_ok=True)
+        except PermissionError:
+            if not IS_WINDOWS or not left:
+                raise
+            time.sleep(0.025)
+
+
+def remove_questions(log, ids):
+    """把這些題目連同它們的回答、送達、收起紀錄整個刪掉。要在 EventLog 的鎖裡呼叫。回傳刪掉幾個檔。"""
+    gone = set(ids)
+    if not gone:
+        return 0
+    events = log.read()
+    answers = {e.get('event_id') for e in events
+               if e.get('kind') == 'answer' and e.get('question_id') in gone}
+    log.rewrite([e for e in events
+                 if e.get('question_id') not in gone and e.get('ref') not in answers])
+    removed = 0
+    for path in (home() / 'questions').glob('*.json'):
+        if path.stem in gone:
+            remove_file(path)
+            removed += 1
+    return removed
 
 
 def prune(days):
@@ -507,17 +545,7 @@ def prune(days):
             except (KeyError, TypeError, ValueError):
                 continue
             closed_at[e.get('question_id')] = max(when, closed_at.get(e.get('question_id'), 0))
-        gone = {qid for qid, when in closed_at.items() if when < cutoff}
-        removed = 0
-        if gone:
-            answers = {e.get('event_id') for e in events
-                       if e.get('kind') == 'answer' and e.get('question_id') in gone}
-            log.rewrite([e for e in events
-                         if e.get('question_id') not in gone and e.get('ref') not in answers])
-            for path in (home() / 'questions').glob('*.json'):
-                if path.stem in gone:
-                    path.unlink(missing_ok=True)
-                    removed += 1
+        removed = remove_questions(log, {qid for qid, when in closed_at.items() if when < cutoff})
     sessions = home() / 'sessions'
     if sessions.is_dir():
         for path in sessions.iterdir():
@@ -550,6 +578,24 @@ def auto_prune(days):
         time.sleep(PRUNE_EVERY_SECONDS)
 
 
+def validate_dismissal(payload, questions):
+    """使用者要直接刪掉的完成摘要。回傳確實存在、可以刪的題號；已經不在的略過（重複按不算錯）。"""
+    ids = payload.get('ids') if isinstance(payload, dict) else None
+    if not isinstance(ids, list) or not ids or len(ids) > 500:
+        raise ValueError('ids 必須是非空陣列')
+    found = []
+    for qid in ids:
+        if not isinstance(qid, str):
+            raise ValueError('題號格式不對')
+        q = questions.get(qid)
+        if not q:
+            continue
+        if q.get('kind') != 'report':
+            raise ValueError('只有完成摘要可以直接刪除；題目要回答，或由 agent 收起')
+        found.append(qid)
+    return found
+
+
 def validate_answers(payload, questions):
     answers = payload.get('answers') if isinstance(payload, dict) else None
     if not isinstance(answers, list) or not answers:
@@ -571,7 +617,13 @@ def validate_answers(payload, questions):
         if not isinstance(choice, str) or not isinstance(text, str) or len(text) > MAX_TEXT:
             raise ValueError('欄位格式不對')
         labels = {o['key']: o['label'] for o in q.get('options', [])}
-        if q.get('kind') == 'info':
+        if q.get('kind') == 'report':
+            if choice not in ('', 'ack'):
+                raise ValueError('完成摘要沒有選項可以選')
+            if not text.strip():
+                raise ValueError('沒有意見的摘要直接刪除就好，不用送出')
+            choice = 'ack'
+        elif q.get('kind') == 'info':
             if choice not in ('', 'ack'):
                 raise ValueError('知會題只能按「我知道了」')
             choice = 'ack'
@@ -671,7 +723,7 @@ class Handler(BaseHTTPRequestHandler):
         # 先把請求本文讀完再回錯誤：Windows 關掉還有未讀資料的連線會送 RST，
         # 對方收不到 403／404，只看到連線被重設（WinError 10053／10054）。
         raw = self.rfile.read(length) if length and 0 < length <= MAX_BODY else None
-        if self.path != '/api/answer':
+        if self.path not in ('/api/answer', '/api/dismiss'):
             return self.send_text(404, 'not found')
         if not self.check(api=True):
             return
@@ -685,8 +737,14 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(raw.decode('utf-8'))
             with EventLog() as log:  # 檢查和寫入在同一把鎖裡：連點兩下也只會存一則
                 questions = {q['id']: q for q in build_state(log.read())['questions']}
+                if self.path == '/api/dismiss':
+                    removed = remove_questions(log, validate_dismissal(payload, questions))
+                    return self.send_text(200, json.dumps({'removed': removed}), 'application/json')
                 events = validate_answers(payload, questions)
-                log.append(events)
+                # 對完成摘要的意見一送出就把摘要收起：使用者這邊算讀完了，剩下的是把意見交給 agent
+                closing = [{'event_id': str(uuid.uuid4()), 'kind': 'closed', 'question_id': e['question_id'],
+                            'at': e['at']} for e in events if questions[e['question_id']].get('kind') == 'report']
+                log.append(events + closing)
         except ValueError as exc:
             return self.send_text(400, str(exc))
         self.send_text(200, json.dumps({'stored': len(events)}), 'application/json')
@@ -818,10 +876,20 @@ def cmd_ask(args):
                         'recommended': key.strip() == args.recommend})
     if args.recommend and not any(o['recommended'] for o in options):
         sys.exit('--recommend 指的選項不存在')
+    post('info' if args.info else 'ask', args, options=options, deadline=args.deadline or '')
+
+
+def cmd_report(args):
+    """放一則完成摘要：只給使用者看，他讀完按刪除就不見了；有意見才會送回來。"""
+    post('report', args)
+
+
+def post(kind, args, options=(), deadline=''):
     body = Path(args.body_file).read_text(encoding='utf-8') if args.body_file else (args.body or '')
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-    q = {'id': 'q-%s-%s' % (stamp, secrets.token_hex(2)), 'kind': 'info' if args.info else 'ask',
-         'title': args.title, 'body': body, 'options': options, 'deadline': args.deadline or '',
+    prefix = 'r' if kind == 'report' else 'q'
+    q = {'id': '%s-%s-%s' % (prefix, stamp, secrets.token_hex(2)), 'kind': kind,
+         'title': args.title, 'body': body, 'options': list(options), 'deadline': deadline,
          'from': args.source or os.path.basename(project_of(os.getcwd())),
          'project': project_of(os.getcwd()), 'session': os.environ.get('CLAUDE_CODE_SESSION_ID', ''),
          'created': now_iso()}
@@ -888,7 +956,10 @@ def cmd_list(args):
     for q in build_state()['questions']:
         if q['closed'] and not args.all:
             continue
-        status = '已收起' if q['closed'] else ('已回答' if q['answers'] else '等回答')
+        if q.get('kind') == 'report':
+            status = '摘要，意見待送' if q['answers'] else '摘要，未讀'
+        else:
+            status = '已收起' if q['closed'] else ('已回答' if q['answers'] else '等回答')
         print('%s  %s  %s  （%s）' % (q['id'], status, q['title'], q['from']))
 
 
@@ -971,6 +1042,12 @@ def main(argv=None):
     p.add_argument('--deadline')
     p.add_argument('--from', dest='source', help='顯示的來源名稱，預設是專案資料夾名')
     p.set_defaults(func=cmd_ask)
+    p = sub.add_parser('report', help='放一則完成摘要，使用者讀完就刪')
+    p.add_argument('--title', required=True)
+    p.add_argument('--body')
+    p.add_argument('--body-file')
+    p.add_argument('--from', dest='source', help='顯示的來源名稱，預設是專案資料夾名')
+    p.set_defaults(func=cmd_report)
     p = sub.add_parser('take', help='取出這個 session 的新回覆')
     p.set_defaults(func=cmd_take)
     p = sub.add_parser('wait', help='等到有新回覆才結束')

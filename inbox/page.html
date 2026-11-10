@@ -109,6 +109,21 @@
       .tag.due {
         color: var(--amber);
       }
+      .tag.report {
+        color: var(--teal);
+      }
+      .card.report {
+        border-left: 3px solid var(--teal);
+      }
+      .section-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin: 28px 0 10px;
+      }
+      .section-row h2 {
+        margin: 0;
+      }
       .card h3 {
         margin: 6px 0 8px;
         font-size: 17px;
@@ -353,6 +368,10 @@
               String(d.getMinutes()).padStart(2, "0");
       }
 
+      function isReport(q) {
+        return q.kind === "report";
+      }
+
       function isOpen(q) {
         return !q.closed && q.answers.length === 0;
       }
@@ -372,6 +391,7 @@
           "<span>" + when(q.created) + "</span>",
         ];
         if (q.kind === "info") tags.push('<span class="tag info">知會</span>');
+        if (isReport(q)) tags.push('<span class="tag report">完成摘要</span>');
         if (q.deadline)
           tags.push(
             '<span class="tag due">期限：' + esc(q.deadline) + "</span>",
@@ -379,6 +399,7 @@
         let html =
           '<article class="card' +
           (open ? "" : " done") +
+          (isReport(q) ? " report" : "") +
           '" data-id="' +
           esc(q.id) +
           '">' +
@@ -390,7 +411,13 @@
           '<div class="body">' +
           renderBody(q.body) +
           "</div>";
-        if (open) {
+        if (open && isReport(q)) {
+          html +=
+            '<textarea data-text placeholder="有意見可以寫在這裡（選填）。有寫的話會先送回給 agent，再刪除這則摘要">' +
+            esc(d.text || "") +
+            "</textarea>" +
+            '<div class="row"><button data-dismiss>已讀，刪除</button></div>';
+        } else if (open) {
           if (q.options.length) {
             html +=
               '<div class="opts" role="radiogroup" aria-label="' +
@@ -448,17 +475,28 @@
       }
 
       function render() {
-        const open = STATE.questions.filter(isOpen).reverse();
-        const answered = STATE.questions
-          .filter((q) => !q.closed && q.answers.length)
-          .reverse();
-        const closed = STATE.questions.filter((q) => q.closed).reverse();
+        // 完成摘要自成一區：不算在待答題數裡，讀完就刪，也不進「已回答」和「已收起」
+        const asks = STATE.questions.filter((q) => !isReport(q));
+        const open = asks.filter(isOpen).reverse();
+        const reports = openReports().reverse();
+        const answered = asks.filter((q) => !q.closed && q.answers.length).reverse();
+        const closed = asks.filter((q) => q.closed).reverse();
         $("count").innerHTML = "待你回 <b>" + open.length + "</b> 題";
         let html =
           "<h2>待你回答</h2>" +
           (open.length
             ? open.map(cardHtml).join("")
             : '<div class="empty">目前沒有要你回答的事。</div>');
+        if (reports.length)
+          html +=
+            '<div class="section-row"><h2>完成摘要（' +
+            reports.length +
+            " 則）</h2>" +
+            (reports.length > 1
+              ? "<button data-dismiss-all>全部已讀，刪除</button>"
+              : "") +
+            "</div>" +
+            reports.map(cardHtml).join("");
         if (answered.length)
           html +=
             "<h2>已回答、等 agent 處理</h2>" + answered.map(cardHtml).join("");
@@ -473,10 +511,18 @@
         updateFooter();
       }
 
+      function openReports() {
+        return STATE.questions.filter((q) => isReport(q) && isOpen(q));
+      }
+
+      function readyToSend() {
+        return STATE.questions.filter(
+          (q) => isOpen(q) && q.kind !== "info" && !isReport(q) && ready(q),
+        );
+      }
+
       function updateFooter() {
-        const n = STATE.questions.filter(
-          (q) => isOpen(q) && q.kind !== "info" && ready(q),
-        ).length;
+        const n = readyToSend().length;
         $("ready").textContent = n ? "已答 " + n + " 題" : "";
         $("send-all").disabled = n === 0;
       }
@@ -518,8 +564,7 @@
       async function send(ids) {
         if (sending || !ids.length) return;
         sending = true;
-        const buttons = () => document.querySelectorAll("[data-send], #send-all");
-        buttons().forEach((b) => (b.disabled = true));
+        setBusy(true);
         const answers = ids.map((id) => {
           const d = getDraft(id);
           const q = STATE.questions.find((x) => x.id === id);
@@ -542,12 +587,60 @@
         } catch (e) {
           failure = "送出失敗：" + e.message;
         }
+        await settle(failure);
+      }
+
+      function setBusy(busy) {
+        document
+          .querySelectorAll("[data-send], [data-dismiss], [data-dismiss-all], #send-all")
+          .forEach((b) => (b.disabled = busy));
+      }
+
+      async function settle(failure) {
         sending = false;
         lastJson = "";
         await load();
-        buttons().forEach((b) => (b.disabled = false));
+        setBusy(false);
         updateFooter();
         if (failure) $("err").textContent = failure;
+      }
+
+      async function post(path, body) {
+        const res = await fetch(path, {
+          method: "POST",
+          headers: HEADERS,
+          body: JSON.stringify(body),
+        });
+        return res.ok ? "" : "送出失敗：" + (await res.text());
+      }
+
+      // 讀完完成摘要：有寫意見的先把意見送回給 agent，沒寫的直接刪掉
+      async function finishReports(ids) {
+        if (sending || !ids.length) return;
+        sending = true;
+        setBusy(true);
+        $("err").textContent = "";
+        const text = (id) => (getDraft(id).text || "").trim();
+        const withText = ids.filter((id) => text(id));
+        const plain = ids.filter((id) => !text(id));
+        let failure = "";
+        try {
+          if (withText.length)
+            failure = await post("/api/answer", {
+              answers: withText.map((id) => ({
+                question_id: id,
+                choice: "ack",
+                text: text(id),
+              })),
+            });
+          if (!failure && plain.length)
+            failure = await post("/api/dismiss", { ids: plain });
+          if (!failure)
+            ids.forEach((id) => localStorage.removeItem(draftKey(id)));
+        } catch (e) {
+          failure = "送出失敗：" + e.message;
+        }
+        await settle(failure);
       }
 
       document.addEventListener("change", (e) => {
@@ -581,6 +674,10 @@
         }, 0);
       });
       document.addEventListener("click", (e) => {
+        const dismiss = e.target.closest("[data-dismiss]");
+        if (dismiss) return finishReports([dismiss.closest(".card").dataset.id]);
+        if (e.target.closest("[data-dismiss-all]"))
+          return finishReports(openReports().map((q) => q.id));
         const btn = e.target.closest("[data-send]");
         if (btn) {
           const id = btn.closest(".card").dataset.id;
@@ -593,11 +690,7 @@
         }
       });
       $("send-all").addEventListener("click", () => {
-        send(
-          STATE.questions
-            .filter((q) => isOpen(q) && q.kind !== "info" && ready(q))
-            .map((q) => q.id),
-        );
+        send(readyToSend().map((q) => q.id));
       });
 
       load();

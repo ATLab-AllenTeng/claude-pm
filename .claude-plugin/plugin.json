@@ -1,6 +1,10 @@
 {
   "name": "inbox",
-  "version": "0.4.1",
-  "description": "收件匣：agent 把要你決定的事放進一個網頁，你回答後答案自動回到 agent 手上。另附一份總PM 多工作線操作說明。",
-  "license": "MIT"
+  "version": "0.5.0",
+  "description": "收件匣：agent 把要你決定的事和做完的摘要放進一個網頁，你回答後答案自動回到 agent 手上。支援 macOS、Linux 與原生 Windows，可搭配 Tailscale Serve 從手機或遠端開。另附總PM 多工作線操作說明。",
+  "author": { "name": "ATLab-AllenTeng", "url": "https://github.com/ATLab-AllenTeng" },
+  "homepage": "https://github.com/ATLab-AllenTeng/claude-pm",
+  "repository": "https://github.com/ATLab-AllenTeng/claude-pm",
+  "license": "MIT",
+  "keywords": ["inbox", "收件匣", "總PM", "human-in-the-loop", "hooks"]
 }

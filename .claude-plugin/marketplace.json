@@ -1,8 +1,8 @@
 {
   "name": "claude-pm",
-  "description": "Claude Code 收件匣（繁體中文）",
+  "description": "Claude Code 收件匣與總PM 模式（繁體中文）。chenjackle45/claude-inbox 的分支版本，多了原生 Windows 支援、完成摘要與遠端存取。",
   "owner": { "name": "ATLab-AllenTeng" },
   "plugins": [
-    { "name": "inbox", "source": "./", "description": "收件匣與總PM 操作說明" }
+    { "name": "inbox", "source": "./", "description": "收件匣：要你決定的事和做完的摘要集中在一個網頁，答案自動回到 agent。另附總PM 多工作線操作說明。" }
   ]
 }

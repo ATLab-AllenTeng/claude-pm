@@ -901,5 +901,100 @@ class Server(Base):
         self.assertIn('?t=' + config['token'], inbox.page_url(config))
 
 
+class Reports(Base):
+    start = Server.start
+    req = Server.req
+    TOK = {'X-Inbox-Token': 'tok'}
+
+    def report(self, title='登入頁改版做完了', body='合進 main 了，測試都過。'):
+        with redirect_stdout(io.StringIO()) as out:
+            inbox.main(['report', '--title', title, '--body', body])
+        return out.getvalue().split('已放進收件匣：')[1].split()[0]
+
+    def state(self, port):
+        return {q['id']: q for q in json.loads(self.req(port, '/api/state', headers=self.TOK)[1])['questions']}
+
+    def test_report_is_stored_as_its_own_kind(self):
+        rid = self.report()
+        q = inbox.load_questions()[0]
+        self.assertEqual((q['id'], q['kind'], q['options'], q['session']), (rid, 'report', [], 'sess-1'))
+        self.assertTrue(rid.startswith('r-'))
+        with redirect_stdout(io.StringIO()) as out:
+            inbox.main(['list'])
+        self.assertIn('摘要，未讀', out.getvalue())
+
+    def test_dismiss_deletes_report_at_once_and_tells_the_agent_nothing(self):
+        keep, gone = self.report('留著的'), self.report('要刪的')
+        port = self.start(token='tok')
+        code, body = self.req(port, '/api/dismiss', {'ids': [gone]}, headers=self.TOK)
+        self.assertEqual((code, json.loads(body)), (200, {'removed': 1}))
+        self.assertEqual(sorted(self.state(port)), [keep])
+        self.assertEqual([p.stem for p in (inbox.home() / 'questions').glob('*.json')], [keep])
+        self.assertEqual(inbox.take('sess-1', str(self.project)), [])  # 沒有東西要交給 agent
+        code, body = self.req(port, '/api/dismiss', {'ids': [gone]}, headers=self.TOK)  # 重複按不算錯
+        self.assertEqual((code, json.loads(body)), (200, {'removed': 0}))
+
+    def test_dismiss_refuses_questions_bad_input_and_missing_token(self):
+        rid = self.report()
+        qid = self.ask('--title', '要你決定的事', '--option', 'A=甲')
+        info = self.ask('--info', '--title', '知會')
+        port = self.start(token='tok')
+        for ids in ([qid], [info], [rid, qid]):  # 混了一個不是摘要的，整包都不刪
+            code, body = self.req(port, '/api/dismiss', {'ids': ids}, headers=self.TOK)
+            self.assertEqual(code, 400, ids)
+            self.assertIn('只有完成摘要', body)
+        for bad in ({'ids': []}, {'ids': 'r-1'}, {'ids': [5]}, {}, [rid]):
+            self.assertEqual(self.req(port, '/api/dismiss', bad, headers=self.TOK)[0], 400, bad)
+        self.assertEqual(self.req(port, '/api/dismiss', {'ids': [rid]})[0], 401)
+        self.assertEqual(self.req(port, '/api/dismiss', {'ids': [rid]},
+                                  headers=dict(self.TOK, Origin='http://evil.example'))[0], 403)
+        self.assertEqual(len(inbox.load_questions()), 3)  # 什麼都沒被刪
+
+    def test_feedback_closes_report_reaches_agent_and_then_the_report_is_gone(self):
+        rid = self.report('匯出報表做完了')
+        other = self.ask('--title', '另一題', '--option', 'A=甲')
+        port = self.start(token='tok')
+        feedback = {'answers': [{'question_id': rid, 'choice': 'ack', 'text': '欄位順序不對，請照舊版'}]}
+        self.assertEqual(self.req(port, '/api/answer', feedback, headers=self.TOK)[0], 200)
+        shown = self.state(port)[rid]
+        self.assertTrue(shown['closed'])  # 使用者這邊算讀完了，畫面上不再出現
+        self.assertEqual(self.req(port, '/api/answer', feedback, headers=self.TOK)[0], 400)  # 不能送第二次
+        seen = []
+        pairs = inbox.take('sess-1', str(self.project), emit=lambda p: seen.append(inbox.format_answers(p)))
+        self.assertEqual(len(pairs), 1)
+        self.assertIn('完成摘要：匯出報表做完了', seen[0])
+        self.assertIn('有意見：欄位順序不對，請照舊版', seen[0])
+        self.assertIn('不用再收', seen[0])
+        self.assertEqual(sorted(self.state(port)), [other])  # 意見交出去後，摘要連同紀錄一起刪掉
+        self.assertEqual([e for e in inbox.read_events() if e.get('question_id') == rid], [])
+        self.assertEqual([e for e in inbox.read_events() if e.get('kind') == 'delivered'], [])
+
+    def test_report_feedback_must_have_text_and_cannot_pick_options(self):
+        rid = self.report()
+        port = self.start(token='tok')
+        for bad in ({'question_id': rid}, {'question_id': rid, 'choice': 'ack'},
+                    {'question_id': rid, 'choice': 'ack', 'text': '   '}, {'question_id': rid, 'choice': 'A', 'text': 'x'}):
+            self.assertEqual(self.req(port, '/api/answer', {'answers': [bad]}, headers=self.TOK)[0], 400, bad)
+        self.assertEqual(inbox.read_events(), [])
+
+    def test_unread_report_survives_prune_and_keeps_server_waiting(self):
+        rid = self.report()
+        self.assertEqual(inbox.prune(1), 0)
+        waiting = [q for q in inbox.build_state()['questions'] if not q['closed'] and not q['answers']]
+        self.assertEqual([q['id'] for q in waiting], [rid])  # 還沒讀的摘要算「有東西在等」，服務不會閒置結束
+        self.assertFalse(inbox.idle_too_long(0, 99 * 3600, 12 * 3600, waiting=len(waiting)))
+
+    def test_mixed_delivery_keeps_the_close_reminder_for_real_questions(self):
+        rid = self.report('摘要')
+        qid = self.ask('--title', '題目', '--option', 'A=甲')
+        port = self.start(token='tok')
+        self.req(port, '/api/answer', {'answers': [{'question_id': rid, 'text': '意見'},
+                                                   {'question_id': qid, 'choice': 'A'}]}, headers=self.TOK)
+        text = inbox.format_answers(inbox.take('sess-1', str(self.project)))
+        self.assertIn('inbox close', text)
+        self.assertIn('使用者選：A 甲', text)
+        self.assertEqual([q['id'] for q in inbox.load_questions()], [qid])  # 題目留著等 agent 收，摘要刪掉
+
+
 if __name__ == '__main__':
     unittest.main()
