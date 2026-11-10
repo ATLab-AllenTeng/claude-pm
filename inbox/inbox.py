@@ -28,7 +28,7 @@ MAX_BODY = 64 * 1024
 MAX_TEXT = 4000
 IDLE_CHECK_SECONDS = 60
 TAILSCALE_NET = ipaddress.ip_network('100.64.0.0/10')  # Tailscale 的位址範圍，連線本身有加密
-ORPHAN_SECONDS = 30 * 60  # 回答放了 30 分鐘、出題的 session 也 30 分鐘沒動靜，同專案其他 session 才可以拿
+TAKEOVER_HOURS = 24  # 出題的對話沒說自己結束、但這麼久沒動靜，就當它不在了（config 的 takeover_hours 可改）
 
 
 # ---------- 路徑與設定 ----------
@@ -41,7 +41,8 @@ def home():
 
 
 def read_config(path):
-    config = {'host': '127.0.0.1', 'port': DEFAULT_PORT, 'token': '', 'idle_hours': 12}
+    config = {'host': '127.0.0.1', 'port': DEFAULT_PORT, 'token': '', 'idle_hours': 12,
+              'takeover_hours': TAKEOVER_HOURS}
     if path.exists():
         config.update(json.loads(path.read_text(encoding='utf-8')))
     return config
@@ -130,7 +131,7 @@ def session_file(session_id):
 
 
 def touch_session(session_id):
-    """記下這個 session 剛剛還在：出題、來拿回答、在 wait 裡等，都算。"""
+    """記下這個 session 剛剛還有動靜。不會把「已結束」改回來：背景殘留的 wait 也會走到這裡。"""
     if not session_id:
         return
     now = time.time()
@@ -146,7 +147,46 @@ def last_seen(session_id):
     try:
         return session_file(session_id).stat().st_mtime
     except OSError:
-        return 0.0  # 沒記錄過（例如舊版出的題）就當它不在了
+        return 0.0  # 沒記錄過（例如舊版出的題）
+
+
+def ended_file(session_id):
+    path = session_file(session_id)
+    return path.with_name(path.name + '.ended')
+
+
+def mark_ended(session_id):
+    """Claude Code 說這個 session 結束了（SessionEnd hook）：它的回答可以馬上交給同專案的其他對話。"""
+    if not session_id:
+        return
+    try:
+        ended_file(session_id).touch(mode=0o600)
+    except OSError:
+        pass
+
+
+def session_ended(session_id):
+    return bool(session_id) and ended_file(session_id).exists()
+
+
+def revive_session(session_id):
+    """這個 session 確定還在用（出題、送出 prompt、被 resume、自己來拿回答）：記下動靜並取消「已結束」。"""
+    if not session_id:
+        return
+    try:
+        ended_file(session_id).unlink(missing_ok=True)
+    except OSError:
+        pass
+    touch_session(session_id)
+
+
+def takeover_seconds():
+    """出題的對話多久沒動靜才讓別人接手。0 表示只認 SessionEnd，不靠時間猜。"""
+    try:
+        hours = float(read_config(home() / 'config.json').get('takeover_hours', TAKEOVER_HOURS))
+    except (OSError, TypeError, ValueError):
+        hours = TAKEOVER_HOURS
+    return max(hours, 0) * 3600
 
 
 # ---------- 題目與事件 ----------
@@ -230,24 +270,40 @@ def build_state(events=None):
     return {'questions': items}
 
 
+def asker_gone(q, now, limit):
+    """出題的 session 是不是不在了。
+
+    明確結束（SessionEnd）就算；沒有明確結束的（當機、被強制關掉）看它多久沒動靜。
+    只是閒置、Claude Code 還開著的對話不算不在。
+    """
+    asker = q.get('session')
+    if session_ended(asker):
+        return True
+    if limit <= 0:
+        return False
+    seen = last_seen(asker)
+    if not seen:  # 沒有動靜記錄（舊版出的題）：從出題時間起算
+        try:
+            seen = datetime.fromisoformat(q['created']).timestamp()
+        except (KeyError, TypeError, ValueError):
+            seen = 0.0
+    return now - seen > limit
+
+
 def deliverable(session_id, cwd, events=None, project=None):
     """這個 session 該拿到、還沒拿過的回答。project 可以先算好傳進來，省掉每次問 git。"""
     project = project or project_of(cwd)
     now = time.time()
+    limit = takeover_seconds()
     out = []
     for q in build_state(events)['questions']:
         asker = q.get('session')
         own = bool(asker) and asker == session_id  # 出題的就是這個 session：不管現在在哪個資料夾
         if not own and q.get('project') != project:
             continue
-        # 出題的 session 還有動靜（剛出題、剛來拿過、正在 wait）就不讓別人接手
-        asker_gone = not asker or now - last_seen(asker) > ORPHAN_SECONDS
-        for a in q['answers']:
-            if a['delivered']:
-                continue
-            age = now - datetime.fromisoformat(a['at']).timestamp()
-            if own or not asker or (age > ORPHAN_SECONDS and asker_gone):
-                out.append((q, a))
+        if not own and asker and not asker_gone(q, now, limit):
+            continue  # 出題的對話還在：只有它自己能拿
+        out.extend((q, a) for a in q['answers'] if not a['delivered'])
     return out
 
 
@@ -279,7 +335,6 @@ def take(session_id, cwd, emit=None, project=None):
     有給 emit 時，先把回答交出去、成功了才寫「已送達」。中途被砍掉（例如 hook 逾時）
     的話這則會留到下次再送：寧可重送一次，也不要網頁顯示已收到、agent 卻沒拿到。
     """
-    touch_session(session_id)
     with EventLog() as log:
         pairs = deliverable(session_id, cwd, log.read(), project)
         if pairs and emit:
@@ -553,7 +608,7 @@ def cmd_ask(args):
          'project': project_of(os.getcwd()), 'session': os.environ.get('CLAUDE_CODE_SESSION_ID', ''),
          'created': now_iso()}
     write_json(home() / 'questions' / (q['id'] + '.json'), q)
-    touch_session(q['session'])
+    revive_session(q['session'])
     config = load_config()
     up = ensure_server(config)
     print('已放進收件匣：%s' % q['id'])
@@ -573,7 +628,9 @@ def cmd_close(args):
 
 
 def cmd_take(args):
-    if not take(os.environ.get('CLAUDE_CODE_SESSION_ID', ''), os.getcwd(), emit=emit_answers):
+    session = os.environ.get('CLAUDE_CODE_SESSION_ID', '')
+    revive_session(session)
+    if not take(session, os.getcwd(), emit=emit_answers):
         print('收件匣：沒有新的回覆。')
 
 
@@ -583,7 +640,10 @@ def cmd_wait(args):
     cwd = os.getcwd()
     project = project_of(cwd)  # 只問 git 一次，不要每 3 秒起一個行程
     while time.time() < deadline:
-        touch_session(session)  # 還在等：別讓同專案的其他對話把回答接走
+        if session_ended(session):  # 對話關掉後殘留的 wait：別把回答拿去印給沒人看的地方
+            print('收件匣：這個對話已經結束，不再等回覆。')
+            sys.exit(3)
+        touch_session(session)
         if deliverable(session, cwd, project=project) and take(session, cwd, emit=emit_answers, project=project):
             return
         time.sleep(3)
@@ -597,7 +657,12 @@ def cmd_hook(args):
         data = json.loads(sys.stdin.read() or '{}')
     except ValueError:
         data = {}
-    take(data.get('session_id', ''), data.get('cwd') or os.getcwd(), emit=emit_answers)
+    session = data.get('session_id', '')
+    if data.get('hook_event_name') == 'SessionEnd':
+        mark_ended(session)  # 只記下它結束了；這時印出來的東西 agent 已經看不到，不能把回答交給它
+        return
+    revive_session(session)
+    take(session, data.get('cwd') or os.getcwd(), emit=emit_answers)
 
 
 def cmd_list(args):

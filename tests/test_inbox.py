@@ -117,9 +117,9 @@ class Delivery(Base):
         event = self.answer(qid)
         other = Path(self.tmp.name) / 'other'
         other.mkdir()
-        later = datetime.fromisoformat(event['at']).timestamp() + inbox.ORPHAN_SECONDS + 1
+        later = datetime.fromisoformat(event['at']).timestamp() + inbox.TAKEOVER_HOURS * 3600 + 1
         with mock.patch.object(inbox.time, 'time', return_value=later):
-            self.assertEqual(inbox.take('sess-2', str(other)), [])  # 過了 30 分鐘也只限同專案
+            self.assertEqual(inbox.take('sess-2', str(other)), [])  # 出題的對話再久沒動靜也只限同專案
         with mock.patch.dict(os.environ, {'CLAUDE_CODE_SESSION_ID': ''}):
             anon = self.ask('--title', '匿名', '--option', 'A=甲')
         self.answer(anon)
@@ -132,23 +132,91 @@ class Delivery(Base):
         other.mkdir()
         self.assertEqual(inbox.take('sess-2', str(other)), [])  # 別的專案、別的 session
 
-    def test_orphan_answer_goes_to_same_project_after_30_minutes(self):
+    def test_answer_goes_to_same_project_when_asker_has_been_silent_for_a_day(self):
         qid = self.ask('--title', 't', '--option', 'A=甲')
         event = self.answer(qid)
         self.assertEqual(inbox.take('sess-2', str(self.project)), [])
-        later = datetime.fromisoformat(event['at']).timestamp() + inbox.ORPHAN_SECONDS + 1
+        later = datetime.fromisoformat(event['at']).timestamp() + inbox.TAKEOVER_HOURS * 3600 + 1
         with mock.patch.object(inbox.time, 'time', return_value=later):
             self.assertEqual(len(inbox.take('sess-2', str(self.project))), 1)
 
-    def test_asker_that_is_still_around_keeps_its_answer_past_30_minutes(self):
+    def test_asker_that_is_still_around_keeps_its_answer(self):
         qid = self.ask('--title', 't', '--option', 'A=甲')
         event = self.answer(qid)
-        later = datetime.fromisoformat(event['at']).timestamp() + inbox.ORPHAN_SECONDS + 1
+        later = datetime.fromisoformat(event['at']).timestamp() + inbox.TAKEOVER_HOURS * 3600 + 1
         with mock.patch.object(inbox.time, 'time', return_value=later - 60):
             inbox.touch_session('sess-1')  # 出題的對話一分鐘前還在（例如正在 inbox wait）
         with mock.patch.object(inbox.time, 'time', return_value=later):
             self.assertEqual(inbox.take('sess-2', str(self.project)), [])  # 別的對話接不走
             self.assertEqual(len(inbox.take('sess-1', str(self.project))), 1)
+
+    def hook(self, event, session='sess-1', cwd=None):
+        stdin = io.StringIO(json.dumps({'hook_event_name': event, 'session_id': session,
+                                        'cwd': cwd or str(self.project)}))
+        with mock.patch.object(sys, 'stdin', stdin), redirect_stdout(io.StringIO()) as out:
+            inbox.main(['hook'])
+        return out.getvalue()
+
+    def test_idle_asker_is_not_taken_over_before_the_fallback_time(self):
+        qid = self.ask('--title', 't', '--option', 'A=甲')
+        event = self.answer(qid)
+        hours_later = datetime.fromisoformat(event['at']).timestamp() + 5 * 3600  # 遠超過舊版的 30 分鐘
+        with mock.patch.object(inbox.time, 'time', return_value=hours_later):
+            self.assertEqual(inbox.take('sess-2', str(self.project)), [])
+            self.assertEqual(len(inbox.take('sess-1', str(self.project))), 1)  # 回到原對話還拿得到
+
+    def test_session_end_hands_answer_to_same_project_at_once_and_takes_nothing_itself(self):
+        qid = self.ask('--title', '問題標題', '--option', 'A=甲')
+        self.answer(qid)
+        self.assertEqual(self.hook('SessionEnd'), '')  # 正在關掉的對話不拿回答
+        self.assertFalse(inbox.build_state()['questions'][0]['answers'][0]['delivered'])
+        self.assertTrue(inbox.session_ended('sess-1'))
+        other = Path(self.tmp.name) / 'other'
+        other.mkdir()
+        self.assertEqual(self.hook('UserPromptSubmit', 'sess-3', str(other)), '')  # 別的專案還是拿不到
+        self.assertIn('問題標題', self.hook('UserPromptSubmit', 'sess-2'))  # 同專案馬上接手，不用等
+
+    def test_resumed_session_gets_its_answer_back(self):
+        qid = self.ask('--title', '問題標題', '--option', 'A=甲')
+        self.hook('SessionEnd')
+        self.answer(qid)
+        self.assertIn('問題標題', self.hook('SessionStart'))  # 同一個對話被 resume：自己先拿到
+        self.assertFalse(inbox.session_ended('sess-1'))
+        self.assertEqual(self.hook('UserPromptSubmit', 'sess-2'), '')
+
+    def test_leftover_wait_stops_and_does_not_undo_session_end(self):
+        qid = self.ask('--title', 't', '--option', 'A=甲')
+        self.answer(qid)
+        self.hook('SessionEnd')
+        inbox.touch_session('sess-1')  # 殘留的背景行程碰一下，不能把「已結束」改回來
+        self.assertTrue(inbox.session_ended('sess-1'))
+        with redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit) as stop:
+            inbox.main(['wait', '--timeout', '5'])
+        self.assertEqual(stop.exception.code, 3)
+        self.assertIn('已經結束', out.getvalue())
+        self.assertFalse(inbox.build_state()['questions'][0]['answers'][0]['delivered'])
+
+    def test_takeover_hours_zero_means_only_session_end_counts(self):
+        (inbox.home() / 'config.json').write_text(json.dumps({'takeover_hours': 0}))
+        qid = self.ask('--title', 't', '--option', 'A=甲')
+        event = self.answer(qid)
+        much_later = datetime.fromisoformat(event['at']).timestamp() + 30 * 86400
+        with mock.patch.object(inbox.time, 'time', return_value=much_later):
+            self.assertEqual(inbox.take('sess-2', str(self.project)), [])
+            self.hook('SessionEnd')
+            self.assertEqual(len(inbox.take('sess-2', str(self.project))), 1)
+        (inbox.home() / 'config.json').write_text(json.dumps({'takeover_hours': 'oops'}))
+        self.assertEqual(inbox.takeover_seconds(), inbox.TAKEOVER_HOURS * 3600)  # 看不懂就用預設
+
+    def test_question_without_seen_record_counts_silence_from_when_it_was_asked(self):
+        qid = self.ask('--title', '舊版出的題', '--option', 'A=甲')
+        inbox.session_file('sess-1').unlink()  # 舊版沒有動靜記錄
+        event = self.answer(qid)
+        asked = datetime.fromisoformat(event['at']).timestamp()
+        with mock.patch.object(inbox.time, 'time', return_value=asked + 3600):
+            self.assertEqual(inbox.take('sess-2', str(self.project)), [])
+        with mock.patch.object(inbox.time, 'time', return_value=asked + inbox.TAKEOVER_HOURS * 3600 + 5):
+            self.assertEqual(len(inbox.take('sess-2', str(self.project))), 1)
 
     def test_session_seen_file_is_private_and_missing_one_counts_as_gone(self):
         self.assertEqual(inbox.last_seen('never-seen'), 0.0)
