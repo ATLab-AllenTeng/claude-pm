@@ -94,7 +94,7 @@ Claude Code 專用的「決定信箱」：agent 要你拍板的事，統一放�
 inbox ask --title "要不要上新版？" --option "A=上" --option "B=不上" --recommend A
 ```
 
-> `inbox` 指令是給 agent 的 Bash 用的。你自己在終端機試的話，改用 `python3 <plugin 資料夾>/inbox/inbox.py`，後面的參數一樣。
+> `inbox` 指令是給 agent 的 Bash 用的。你自己在終端機試的話，改用 `python3 <plugin 資料夾>/inbox/inbox.py`（Windows 用 `python`），後面的參數一樣。
 
 ## 你已經有自己的開發規則？疊上去，不要換掉
 
@@ -159,7 +159,7 @@ python3 /path/to/claude-pm/inbox/inbox.py ask --title "..." --option "A=..." --o
 
 > **內網位址要小心。** 收件匣走的是沒加密的 HTTP，token 就在網址裡。Tailscale 的連線本身有加密，可以放心用；一般內網或 Wi-Fi 上，同一個網路的人看得到 token，拿到就能用你的名義回答，等於直接對 agent 下指令。位址不是本機也不是 Tailscale 時，`inbox ask`、`inbox start`、`inbox url` 會印出提醒。
 
-位址只支援 IPv4。token 不分本機或遠端，第一次使用時自動產生，寫進同一個檔（檔案權限 600，資料夾權限 700）。改位址或換 token 後都要重新啟動服務：`inbox stop` 再 `inbox start`。執行中的服務不會自動套用新設定，舊 token 在它重啟前仍然有效。用 `inbox url` 可以印出帶 token 的完整網址。
+位址只支援 IPv4。token 不分本機或遠端，第一次使用時自動產生，寫進同一個檔（macOS／Linux 上檔案權限 600，資料夾權限 700）。改位址或換 token 後都要重新啟動服務：`inbox stop` 再 `inbox start`。執行中的服務不會自動套用新設定，舊 token 在它重啟前仍然有效。用 `inbox url` 可以印出帶 token 的完整網址。
 
 服務不會一直掛著：沒有等你回答的題目、而且 12 小時沒人連進來，它會自己結束，下次 agent 出題時自動再啟動。要改時間，在 `config.json` 加 `"idle_hours": 小時數`；設 `0` 就不自動結束。
 
@@ -206,12 +206,21 @@ Claude Code 不會自動更新這個 marketplace（除非你在 `/plugin` 的 Ma
 
 ### 需求
 
-Python 3.9 以上。答案自動送回 agent 需要 Claude Code；其他 agent 的用法見上方。支援 macOS、Linux 與 WSL（原生 Windows 不支援）。沒有其他依賴。
+Python 3.9 以上。答案自動送回 agent 需要 Claude Code；其他 agent 的用法見上方。支援 macOS、Linux、WSL 與原生 Windows，每次推送都會在這三個平台上跑測試。沒有其他依賴。
+
+### 原生 Windows
+
+- **需要 Git for Windows**。Claude Code 在 Windows 上用 Git Bash 跑 hook，收件匣的 hook 與 `inbox` 指令都走 `bin/inbox` 這支 sh 腳本。沒裝 Git Bash 的話 hook 不會執行，答案就不會自動送回 agent（用 GitHub 安裝這個 plugin 本來就需要 git）。
+- **需要一個真的能執行的 Python**。`bin/inbox` 依序試 `python3`、`python`、`py -3`。Windows 的 `python3` 常是 Microsoft Store 的捷徑，存在但不能執行，所以腳本會先試跑再決定用哪一個。
+- **在 PowerShell 或 cmd 裡**自己下指令時用 `bin\inbox.cmd`，它呼叫的是 `python`。
+- **預設埠 7799 可能綁不到**。Hyper-V、WSL、Docker 會保留一段埠範圍，落在裡面的埠沒人在用也綁不到，`server.log` 會寫出原因。用 `netsh interface ipv4 show excludedportrange protocol=tcp` 查，再到 `config.json` 換一個 `port`。
+- **沒有 600／700 這種檔案權限**。`~/.claude-inbox`（也就是 `C:\Users\你\.claude-inbox`）的保護靠使用者資料夾本身的存取控制。
+- **背景服務是沒有視窗的獨立行程**，關掉終端機不會把它一起關掉；用 `inbox stop` 停。
 
 ### 開發
 
 ```bash
-python3 -m unittest discover tests
+python3 -m unittest discover tests   # Windows 用 python
 ```
 
 版號不用自己管：每次有東西合進 `main`，`.github/workflows/bump-version.yml` 會把 `.claude-plugin/plugin.json` 的 patch 版號加一（Claude Code 靠版號判斷要不要更新，版號沒變使用者就拿不到新內容）。要進 minor 或 major 時，在 PR 裡自己改 `version`，那次就不會再自動加。
