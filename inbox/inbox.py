@@ -27,6 +27,7 @@ DEFAULT_PORT = 7799
 MAX_BODY = 64 * 1024
 MAX_TEXT = 4000
 IDLE_CHECK_SECONDS = 60
+TAILSCALE_NET = ipaddress.ip_network('100.64.0.0/10')  # Tailscale 的位址範圍，連線本身有加密
 ORPHAN_SECONDS = 30 * 60  # 回答放了 30 分鐘、出題的 session 也 30 分鐘沒動靜，同專案其他 session 才可以拿
 
 
@@ -66,6 +67,27 @@ def is_loopback(host):
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def exposure_warning(config):
+    """服務開在本機和 Tailscale 以外的位址時，回一段提醒；其他情況回空字串。"""
+    host = str(config.get('host', ''))
+    if is_loopback(host):
+        return ''
+    try:
+        if ipaddress.ip_address(host) in TAILSCALE_NET:
+            return ''
+    except ValueError:
+        pass
+    return ('注意：收件匣開在 %s，走的是沒加密的 HTTP。同一個網路上的人看得到網址裡的 token，'
+            '拿到 token 就能用你的名義回答，等於直接對 agent 下指令。'
+            '只在你信任的網路上這樣用，或改成 Tailscale 位址。' % host)
+
+
+def warn_exposure(config):
+    warning = exposure_warning(config)
+    if warning:
+        print(warning, file=sys.stderr)
 
 
 def write_json(path, data):
@@ -536,6 +558,7 @@ def cmd_ask(args):
     up = ensure_server(config)
     print('已放進收件匣：%s' % q['id'])
     print('網址：' + page_url(config) if up else '服務沒起來，請看 %s' % (home() / 'server.log'))
+    warn_exposure(config)
 
 
 def cmd_close(args):
@@ -602,6 +625,18 @@ def cmd_prune(args):
     print('已清掉 %d 題（收起超過 %d 天的）' % (prune(args.days), args.days))
 
 
+def cmd_start(args):
+    config = load_config()
+    print(page_url(config) if ensure_server(config) else '啟動失敗')
+    warn_exposure(config)
+
+
+def cmd_url(args):
+    config = load_config()
+    print(page_url(config))
+    warn_exposure(config)
+
+
 def cmd_stop(args):
     pidfile = home() / 'server.pid'
     if not pidfile.exists():
@@ -649,10 +684,9 @@ def main(argv=None):
     p.set_defaults(func=cmd_prune)
     sub.add_parser('hook', help='給 Claude Code hook 用').set_defaults(func=cmd_hook)
     sub.add_parser('serve', help='前景執行網頁服務').set_defaults(func=lambda a: serve(load_config()))
-    sub.add_parser('start', help='背景啟動網頁服務').set_defaults(
-        func=lambda a: print(page_url(load_config()) if ensure_server(load_config()) else '啟動失敗'))
+    sub.add_parser('start', help='背景啟動網頁服務').set_defaults(func=cmd_start)
     sub.add_parser('stop', help='停止背景服務').set_defaults(func=cmd_stop)
-    sub.add_parser('url', help='印出網址').set_defaults(func=lambda a: print(page_url(load_config())))
+    sub.add_parser('url', help='印出網址').set_defaults(func=cmd_url)
     args = parser.parse_args(argv)
     args.func(args)
 

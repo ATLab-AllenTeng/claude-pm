@@ -484,6 +484,25 @@ class Server(Base):
         self.assertEqual(oct(inbox.events_path().stat().st_mode & 0o777), '0o600')
         self.assertEqual(oct((path.parent / 'questions').stat().st_mode & 0o777), '0o700')
 
+    def test_plain_http_warning_only_outside_loopback_and_tailscale(self):
+        from contextlib import redirect_stderr
+        for quiet in ('127.0.0.1', 'localhost', '100.64.0.1', '100.101.102.103'):
+            self.assertEqual(inbox.exposure_warning({'host': quiet}), '')
+        for loud in ('192.168.1.20', '10.0.0.5', '0.0.0.0', 'my-laptop.local'):
+            self.assertIn('沒加密', inbox.exposure_warning({'host': loud}))
+        path = Path(os.environ['CLAUDE_INBOX_HOME']) / 'config.json'
+        inbox.home()
+        path.write_text(json.dumps({'host': '192.168.1.20'}))
+        with redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()) as err:
+            inbox.main(['url'])
+        self.assertIn('http://192.168.1.20:', out.getvalue())
+        self.assertNotIn('注意', out.getvalue())  # 提醒走 stderr，不混進網址那一行
+        self.assertIn('192.168.1.20', err.getvalue())
+        path.write_text(json.dumps({'host': '127.0.0.1'}))
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
+            inbox.main(['url'])
+        self.assertEqual(err.getvalue(), '')
+
     def test_non_loopback_host_gets_token_generated(self):
         path = Path(os.environ['CLAUDE_INBOX_HOME']) / 'config.json'
         inbox.home()
