@@ -282,6 +282,39 @@ class Delivery(Base):
         self.assertTrue(inbox.build_state()['questions'][0]['closed'])
 
 
+class Encoding(Base):
+    def run_cli(self, *argv, stdin=b'', codepage='cp950'):
+        """用真的子行程跑指令，並把 stdio 的預設編碼設成 Windows 繁中的碼頁，看輸出是不是仍然是 UTF-8。"""
+        import subprocess
+        env = dict(os.environ, PYTHONIOENCODING=codepage, PYTHONUTF8='0')
+        return subprocess.run([sys.executable, str(Path(inbox.__file__).resolve()), *argv],
+                              input=stdin, capture_output=True, env=env, cwd=str(self.project), timeout=60)
+
+    def test_hook_output_is_utf8_even_when_console_codepage_is_not(self):
+        qid = self.ask('--title', '要不要上線？🚀', '--option', 'A=上線')  # 表情符號不在 CP950 裡
+        self.answer(qid, 'A', '補充說明')
+        payload = json.dumps({'hook_event_name': 'UserPromptSubmit', 'session_id': 'sess-1',
+                              'cwd': str(self.project)}).encode('utf-8')
+        done = self.run_cli('hook', stdin=payload)
+        self.assertEqual(done.returncode, 0, done.stderr.decode('utf-8', 'replace'))
+        text = done.stdout.decode('utf-8')  # 不是 UTF-8 的話這裡就會丟例外
+        self.assertIn('要不要上線？🚀', text)
+        self.assertIn('補充：補充說明', text)
+
+    def test_hook_accepts_stdin_that_starts_with_a_bom(self):
+        qid = self.ask('--title', '問題標題', '--option', 'A=甲')
+        self.answer(qid)
+        payload = json.dumps({'session_id': 'sess-1', 'cwd': str(self.project)}).encode('utf-8')
+        done = self.run_cli('hook', stdin=b'\xef\xbb\xbf' + payload)
+        self.assertIn('問題標題', done.stdout.decode('utf-8'))
+
+    def test_list_prints_non_ascii_titles_as_utf8(self):
+        self.ask('--title', '標題 ✓')
+        done = self.run_cli('list')
+        self.assertEqual(done.returncode, 0, done.stderr.decode('utf-8', 'replace'))
+        self.assertIn('標題 ✓', done.stdout.decode('utf-8'))
+
+
 class Locking(Base):
     def test_lock_keeps_two_processes_from_interleaving(self):
         import subprocess

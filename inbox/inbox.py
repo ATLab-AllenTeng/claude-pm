@@ -40,6 +40,22 @@ TAILSCALE_NET = ipaddress.ip_network('100.64.0.0/10')  # Tailscale 的位址範�
 TAKEOVER_HOURS = 24  # 出題的對話沒說自己結束、但這麼久沒動靜，就當它不在了（config 的 takeover_hours 可改）
 
 
+# ---------- 文字編碼 ----------
+
+def use_utf8_stdio():
+    """stdin／stdout／stderr 一律用 UTF-8。
+
+    Windows 預設是系統碼頁（繁中是 CP950）：hook 印出的中文進到 agent 會變亂碼，
+    碼頁裡沒有的字還會讓整個指令丟例外；hook 從 stdin 收到的 JSON 也會解錯。
+    """
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, 'reconfigure'):
+            try:
+                stream.reconfigure(encoding='utf-8')
+            except (ValueError, OSError):
+                pass
+
+
 # ---------- 檔案鎖 ----------
 
 class FileLock:
@@ -148,7 +164,8 @@ def now_iso():
 def project_of(cwd):
     try:
         out = subprocess.run(['git', '-C', str(cwd), 'rev-parse', '--show-toplevel'],
-                             capture_output=True, text=True, timeout=5)
+                             capture_output=True, timeout=5,
+                             encoding='utf-8', errors='replace')  # git 印的是 UTF-8，不是系統碼頁
         if out.returncode == 0 and out.stdout.strip():
             return os.path.realpath(out.stdout.strip())
     except (OSError, subprocess.SubprocessError):
@@ -729,7 +746,8 @@ def cmd_wait(args):
 def cmd_hook(args):
     """給 Claude Code hook 用：stdin 是 hook 的 JSON，stdout 會進 agent 的上下文。"""
     try:
-        data = json.loads(sys.stdin.read() or '{}')
+        # Windows PowerShell 5.1 寫 stdin 會先送一個 BOM，json.loads 遇到會失敗
+        data = json.loads(sys.stdin.read().lstrip('\ufeff') or '{}')
     except ValueError:
         data = {}
     session = data.get('session_id', '')
@@ -833,6 +851,7 @@ def main(argv=None):
     sub.add_parser('start', help='背景啟動網頁服務').set_defaults(func=cmd_start)
     sub.add_parser('stop', help='停止背景服務').set_defaults(func=cmd_stop)
     sub.add_parser('url', help='印出網址').set_defaults(func=cmd_url)
+    use_utf8_stdio()
     args = parser.parse_args(argv)
     args.func(args)
 
