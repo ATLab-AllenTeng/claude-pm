@@ -19,6 +19,7 @@ import uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit
 
 try:
     import fcntl
@@ -129,19 +130,56 @@ def is_loopback(host):
         return False
 
 
-def exposure_warning(config):
-    """服務開在本機和 Tailscale 以外的位址時，回一段提醒；其他情況回空字串。"""
-    host = str(config.get('host', ''))
-    if is_loopback(host):
-        return ''
+def public_origin(config):
+    """config 的 public_url 整理成 (origin, host)，例如 ('https://pc.tail1234.ts.net', 'pc.tail1234.ts.net')。
+
+    public_url 是「你在別台裝置上實際打開的網址」：前面有 Tailscale Serve 這類代理把它轉到本機的服務。
+    服務本身照樣只聽本機，這個設定只是讓它多認這一個網址。沒設、或格式不對，回 None。
+    """
+    raw = config.get('public_url')
+    if not raw or not isinstance(raw, str):
+        return None
     try:
-        if ipaddress.ip_address(host) in TAILSCALE_NET:
-            return ''
+        parts = urlsplit(raw.strip())
+        port = parts.port
     except ValueError:
-        pass
-    return ('注意：收件匣開在 %s，走的是沒加密的 HTTP。同一個網路上的人看得到網址裡的 token，'
-            '拿到 token 就能用你的名義回答，等於直接對 agent 下指令。'
-            '只在你信任的網路上這樣用，或改成 Tailscale 位址。' % host)
+        return None
+    host = (parts.hostname or '').lower()
+    if parts.scheme not in ('http', 'https') or not host or ':' in host:
+        return None
+    if parts.username or parts.password or parts.query or parts.fragment or parts.path not in ('', '/'):
+        return None  # 只收「協定＋主機＋埠」，帶路徑或帳密的不是我們能服務的網址
+    default = 443 if parts.scheme == 'https' else 80
+    netloc = host if port in (None, default) else '%s:%d' % (host, port)  # 瀏覽器送的 Host 不帶預設埠
+    return '%s://%s' % (parts.scheme, netloc), netloc
+
+
+def is_private_address(host):
+    """本機，或 Tailscale 配的位址（連線本身有加密）。"""
+    if is_loopback(host):
+        return True
+    try:
+        return ipaddress.ip_address(host) in TAILSCALE_NET
+    except ValueError:
+        return False
+
+
+def exposure_warning(config):
+    """有東西會走沒加密的網路、或設定有問題時，回一段提醒；都沒有就回空字串。"""
+    plain = ('注意：收件匣%s %s，走的是沒加密的 HTTP。同一個網路上的人看得到網址裡的 token，'
+             '拿到 token 就能用你的名義回答，等於直接對 agent 下指令。'
+             '只在你信任的網路上這樣用，或改用 Tailscale。')
+    notes = []
+    host = str(config.get('host', ''))
+    if not is_private_address(host):
+        notes.append(plain % ('開在', host))
+    public = public_origin(config)
+    if config.get('public_url') and not public:
+        notes.append('注意：config.json 的 public_url 看不懂，已忽略。'
+                     '請寫成「https://主機名稱」這種形式，不要帶路徑。')
+    elif public and public[0].startswith('http://') and not is_private_address(public[1].rsplit(':', 1)[0]):
+        notes.append(plain % ('的 public_url 是', public[0]))
+    return '\n'.join(notes)
 
 
 def warn_exposure(config):
@@ -199,8 +237,27 @@ def base_url(config):
     return 'http://%s:%s/' % (host, config['port'])
 
 
+def with_token(url, config):
+    return url + ('?t=' + config['token'] if config.get('token') else '')
+
+
+def local_page_url(config):
+    return with_token(base_url(config), config)
+
+
 def page_url(config):
-    return base_url(config) + ('?t=' + config['token'] if config.get('token') else '')
+    """給使用者打開的網址：有設 public_url 就給那個（他多半不在這台機器前面），否則給本機的。"""
+    public = public_origin(config)
+    return with_token(public[0] + '/', config) if public else local_page_url(config)
+
+
+def print_urls(config):
+    public = public_origin(config)
+    if public:
+        print('外部：' + page_url(config))
+        print('本機：' + local_page_url(config))
+    else:
+        print(page_url(config))
 
 
 # ---------- session 的動靜 ----------
@@ -537,19 +594,28 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-    def allowed_hosts(self):
+    def local_hosts(self):
         port = self.config['port']
         hosts = {'%s:%s' % (self.config['host'], port)}
         if is_loopback(self.config['host']):
             hosts |= {'localhost:%s' % port, '127.0.0.1:%s' % port}
         return hosts
 
+    def allowed_hosts(self):
+        public = public_origin(self.config)
+        return self.local_hosts() | ({public[1]} if public else set())
+
+    def allowed_origins(self):
+        public = public_origin(self.config)
+        return {'http://' + h for h in self.local_hosts()} | ({public[0]} if public else set())
+
     def check(self, api):
-        host = self.headers.get('Host', '')
+        # Host 與 Origin 各自對白名單：前面有代理時，Host 可能是對外的名稱，也可能被代理改成本機位址
+        host = self.headers.get('Host', '').lower()
         if host not in self.allowed_hosts():
             return self.send_text(403, 'Host 不符')
         origin = self.headers.get('Origin')
-        if origin and origin != 'http://' + host:
+        if origin and origin.lower() not in self.allowed_origins():
             return self.send_text(403, 'Origin 不符')
         token = self.config.get('token')
         given = self.headers.get('X-Inbox-Token', '')
@@ -861,13 +927,16 @@ def cmd_prune(args):
 
 def cmd_start(args):
     config = load_config()
-    print(page_url(config) if ensure_server(config) else '啟動失敗')
+    if ensure_server(config):
+        print_urls(config)
+    else:
+        print('啟動失敗')
     warn_exposure(config)
 
 
 def cmd_url(args):
     config = load_config()
-    print(page_url(config))
+    print_urls(config)
     warn_exposure(config)
 
 
