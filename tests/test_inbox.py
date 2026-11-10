@@ -243,6 +243,25 @@ class Server(Base):
         self.assertEqual(self.req(port, '/api/answer', {'answers': [{'question_id': qid, 'choice': 'Z'}]})[0], 400)
         self.assertEqual(inbox.read_events(), [])
 
+    def test_second_answer_and_answer_to_closed_question_rejected(self):
+        qid = self.ask('--title', 't', '--option', 'A=甲')
+        port = self.start()
+        once = {'answers': [{'question_id': qid, 'choice': 'A'}]}
+        twice = {'answers': [{'question_id': qid, 'choice': 'A'}, {'question_id': qid, 'choice': 'A'}]}
+        self.assertEqual(self.req(port, '/api/answer', twice)[0], 400)  # 同一包裡重複
+        self.assertEqual(inbox.read_events(), [])
+        self.assertEqual(self.req(port, '/api/answer', once)[0], 200)
+        code, body = self.req(port, '/api/answer', once)  # 連點兩下
+        self.assertEqual(code, 400)
+        self.assertIn('已經回答過', body)
+        self.assertEqual(len([e for e in inbox.read_events() if e['kind'] == 'answer']), 1)
+        closed = self.ask('--title', '收起的題', '--option', 'A=甲')
+        with redirect_stdout(io.StringIO()):
+            inbox.main(['close', closed])
+        code, body = self.req(port, '/api/answer', {'answers': [{'question_id': closed, 'choice': 'A'}]})
+        self.assertEqual(code, 400)
+        self.assertIn('已經收起來', body)
+
     def test_token_required_when_configured(self):
         port = self.start(token='secret-token')
         self.assertEqual(self.req(port, '/api/state')[0], 401)

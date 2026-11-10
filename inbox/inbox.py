@@ -264,10 +264,16 @@ def validate_answers(payload, questions):
     if not isinstance(answers, list) or not answers:
         raise ValueError('answers 必須是非空陣列')
     events = []
+    seen = set()
     for item in answers:
         q = questions.get(item.get('question_id')) if isinstance(item, dict) else None
         if not q:
             raise ValueError('找不到題目')
+        if q.get('closed'):
+            raise ValueError('這題已經收起來了')
+        if q.get('answers') or q['id'] in seen:
+            raise ValueError('這題已經回答過了')
+        seen.add(q['id'])
         choice = item.get('choice') or ''
         text = item.get('text') or ''
         if not isinstance(choice, str) or not isinstance(text, str) or len(text) > MAX_TEXT:
@@ -349,12 +355,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(413, '內容太大或是空的')
         try:
             payload = json.loads(self.rfile.read(length).decode('utf-8'))
-            questions = {q['id']: q for q in load_questions()}
-            events = validate_answers(payload, questions)
+            with EventLog() as log:  # 檢查和寫入在同一把鎖裡：連點兩下也只會存一則
+                questions = {q['id']: q for q in build_state(log.read())['questions']}
+                events = validate_answers(payload, questions)
+                log.append(events)
         except ValueError as exc:
             return self.send_text(400, str(exc))
-        with EventLog() as log:
-            log.append(events)
         self.send_text(200, json.dumps({'stored': len(events)}), 'application/json')
 
 
