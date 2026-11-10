@@ -533,9 +533,9 @@ class Prune(Base):
 
 
 class Server(Base):
-    def start(self, host='127.0.0.1', token=''):
+    def start(self, host='127.0.0.1', token='', **settings):
         port = free_port()
-        inbox.Handler.config = {'host': host, 'port': port, 'token': token}
+        inbox.Handler.config = dict({'host': host, 'port': port, 'token': token}, **settings)
         httpd = inbox.InboxServer((host, port), inbox.Handler)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         self.addCleanup(httpd.server_close)
@@ -646,6 +646,80 @@ class Server(Base):
         port = self.start()
         with self.assertRaises(OSError):
             inbox.InboxServer(('127.0.0.1', port), inbox.Handler)
+
+    def test_public_url_is_reduced_to_origin_and_host(self):
+        good = {
+            'https://pc.tail1234.ts.net': ('https://pc.tail1234.ts.net', 'pc.tail1234.ts.net'),
+            ' https://PC.Tail1234.ts.net/ ': ('https://pc.tail1234.ts.net', 'pc.tail1234.ts.net'),
+            'https://pc.tail1234.ts.net:443': ('https://pc.tail1234.ts.net', 'pc.tail1234.ts.net'),  # 預設埠不帶
+            'https://pc.tail1234.ts.net:8443': ('https://pc.tail1234.ts.net:8443', 'pc.tail1234.ts.net:8443'),
+            'http://100.101.102.103:8080/': ('http://100.101.102.103:8080', '100.101.102.103:8080'),
+        }
+        for raw, expected in good.items():
+            self.assertEqual(inbox.public_origin({'public_url': raw}), expected, raw)
+        for bad in (None, '', 5, 'pc.tail1234.ts.net', 'ftp://pc.ts.net', 'https://', 'https://pc.ts.net/inbox',
+                    'https://pc.ts.net/?x=1', 'https://me:pw@pc.ts.net', 'https://pc.ts.net:notaport',
+                    'https://[::1]:7799'):
+            self.assertIsNone(inbox.public_origin({'public_url': bad}), bad)
+        self.assertIsNone(inbox.public_origin({}))
+
+    def test_public_url_is_accepted_as_host_and_origin_but_nothing_else_is(self):
+        qid = self.ask('--title', 't', '--option', 'A=甲')
+        port = self.start(token='tok', public_url='https://pc.tail1234.ts.net')
+        tok = {'X-Inbox-Token': 'tok'}
+        via_proxy = dict(tok, Host='pc.tail1234.ts.net', Origin='https://pc.tail1234.ts.net')
+        self.assertEqual(self.req(port, '/', headers={'Host': 'pc.tail1234.ts.net'})[0], 200)
+        self.assertEqual(self.req(port, '/api/state', headers=via_proxy)[0], 200)
+        # 代理把 Host 改成本機位址、Origin 仍是對外網址，也要通
+        self.assertEqual(self.req(port, '/api/state', headers=dict(tok, Origin='https://pc.tail1234.ts.net'))[0], 200)
+        self.assertEqual(self.req(port, '/api/state', headers=dict(tok, Host='PC.Tail1234.TS.net'))[0], 200)
+        answer = {'answers': [{'question_id': qid, 'choice': 'A'}]}
+        self.assertEqual(self.req(port, '/api/answer', answer, headers=via_proxy)[0], 200)
+        self.assertEqual(self.req(port, '/api/state', headers=tok)[0], 200)  # 本機照常能用
+        for headers in (dict(tok, Host='evil.ts.net'),                                  # 別的主機名稱
+                        dict(tok, Host='pc.tail1234.ts.net:8443'),                      # 埠不對
+                        dict(via_proxy, Origin='http://pc.tail1234.ts.net'),            # 協定不對
+                        dict(via_proxy, Origin='https://evil.example')):
+            self.assertEqual(self.req(port, '/api/state', headers=headers)[0], 403, headers)
+        self.assertEqual(self.req(port, '/api/state', headers={'Host': 'pc.tail1234.ts.net'})[0], 401)  # 仍然要 token
+
+    def test_public_host_is_refused_when_not_configured(self):
+        port = self.start(token='tok')
+        self.assertEqual(self.req(port, '/api/state', headers={'X-Inbox-Token': 'tok', 'Host': 'pc.tail1234.ts.net'})[0], 403)
+        self.assertEqual(self.req(port, '/api/state',
+                                  headers={'X-Inbox-Token': 'tok', 'Origin': 'https://pc.tail1234.ts.net'})[0], 403)
+
+    def test_urls_printed_with_and_without_public_url(self):
+        from contextlib import redirect_stderr
+        path = inbox.home() / 'config.json'
+        path.write_text(json.dumps({'port': 7811, 'token': 'tok', 'public_url': 'https://pc.tail1234.ts.net/'}))
+        with redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()) as err:
+            inbox.main(['url'])
+        self.assertEqual(out.getvalue().splitlines(), ['外部：https://pc.tail1234.ts.net/?t=tok',
+                                                       '本機：http://localhost:7811/?t=tok'])
+        self.assertEqual(err.getvalue(), '')  # https 的對外網址、本機的服務：沒有要提醒的
+        qid_out = io.StringIO()
+        with redirect_stdout(qid_out):
+            inbox.main(['ask', '--title', 't'])
+        self.assertIn('網址：https://pc.tail1234.ts.net/?t=tok', qid_out.getvalue())  # 出題時給的是對外網址
+        path.write_text(json.dumps({'port': 7811, 'token': 'tok'}))
+        with redirect_stdout(io.StringIO()) as out:
+            inbox.main(['url'])
+        self.assertEqual(out.getvalue().splitlines(), ['http://localhost:7811/?t=tok'])
+
+    def test_warnings_for_plain_http_or_unreadable_public_url(self):
+        quiet = [{'host': '127.0.0.1', 'public_url': 'https://pc.tail1234.ts.net'},
+                 {'host': '127.0.0.1', 'public_url': 'http://100.101.102.103:8080'},  # Tailscale 位址，連線有加密
+                 {'host': '127.0.0.1'}]
+        for config in quiet:
+            self.assertEqual(inbox.exposure_warning(config), '', config)
+        plain = inbox.exposure_warning({'host': '127.0.0.1', 'public_url': 'http://pc.example.com'})
+        self.assertIn('沒加密', plain)
+        self.assertIn('http://pc.example.com', plain)
+        unreadable = inbox.exposure_warning({'host': '127.0.0.1', 'public_url': 'pc.tail1234.ts.net/inbox'})
+        self.assertIn('public_url 看不懂', unreadable)
+        both = inbox.exposure_warning({'host': '192.168.1.20', 'public_url': 'nonsense'})
+        self.assertEqual(len(both.splitlines()), 2)
 
     def test_token_required_when_configured(self):
         port = self.start(token='secret-token')

@@ -149,13 +149,54 @@ python3 /path/to/claude-pm/inbox/inbox.py ask --title "..." --option "A=..." --o
 <details>
 <summary><b>進階：從手機看、資料放哪、答案送給哪個對話</b></summary>
 
-### 從手機看
+### 從手機或別台電腦看
 
-預設只開在本機。要用手機看，編輯 `~/.claude-inbox/config.json`：
+預設只開在本機。人不在那台機器前面時（遠端操作、用手機），有兩種做法。
+
+#### 建議：Tailscale Serve
+
+服務照樣只聽本機，由 [Tailscale Serve](https://tailscale.com/kb/1242/tailscale-serve) 提供 HTTPS 並轉進來。只有你 tailnet 裡的裝置連得到，不會公開到網際網路；本機的 `localhost` 也照常能用。
+
+1. 跑收件匣的機器和你的手機都裝 Tailscale，登入同一個帳號。
+2. 在跑收件匣的機器上開代理（`7799` 換成你 `config.json` 裡的 `port`）：
+
+   ```bash
+   tailscale serve --bg 7799
+   ```
+
+   它會印出一個 `https://機器名.tailnet名.ts.net` 的網址。
+3. 把那個網址寫進 `~/.claude-inbox/config.json`：
+
+   ```json
+   { "port": 7799, "public_url": "https://機器名.tailnet名.ts.net" }
+   ```
+
+4. 重新啟動服務，拿帶 token 的網址：
+
+   ```bash
+   inbox stop
+   inbox start
+   ```
+
+   會印出「外部」和「本機」兩個網址，手機開「外部」那個。之後 agent 出題時給的也是這個網址。
+
+要知道的事：
+
+- **不要用 `tailscale funnel`**。Funnel 會把服務公開到網際網路，那時 token 是唯一的防線。
+- **代理會一直開著**，重開機後也在，和收件匣服務有沒有在跑無關。不用時跑 `tailscale serve --https=443 off`。
+- **收件匣服務閒置會自己結束**（見下方 `idle_hours`），那時「外部」網址會顯示錯誤頁，到 agent 下次出題才恢復。想讓它一直開著就設 `"idle_hours": 0`。
+- **443 已經被你別的 Serve 佔用**時，改用別的埠：`tailscale serve --bg --https=8443 7799`，`public_url` 也要帶上 `:8443`。不能用子路徑（`--set-path`），收件匣的網頁只能放在網址的根。
+- `public_url` 只收「協定＋主機＋埠」，不要帶路徑。寫錯時 `inbox url` 會提醒並忽略它。
+
+#### 另一種：直接綁到網路位址
+
+不想用 Serve 的話，可以讓服務直接聽某個位址：
 
 ```json
 { "host": "你的 Tailscale 或內網位址", "port": 7799 }
 ```
+
+這樣走的是沒加密的 HTTP，而且本機要改用那個位址開，`localhost` 會連不上。
 
 > **內網位址要小心。** 收件匣走的是沒加密的 HTTP，token 就在網址裡。Tailscale 的連線本身有加密，可以放心用；一般內網或 Wi-Fi 上，同一個網路的人看得到 token，拿到就能用你的名義回答，等於直接對 agent 下指令。位址不是本機也不是 Tailscale 時，`inbox ask`、`inbox start`、`inbox url` 會印出提醒。
 

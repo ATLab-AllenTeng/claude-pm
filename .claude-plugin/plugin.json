@@ -1,6 +1,6 @@
 {
   "name": "inbox",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "收件匣：agent 把要你決定的事放進一個網頁，你回答後答案自動回到 agent 手上。另附一份總PM 多工作線操作說明。",
   "license": "MIT"
 }
