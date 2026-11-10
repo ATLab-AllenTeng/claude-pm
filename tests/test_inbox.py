@@ -317,6 +317,47 @@ class Prune(Base):
             inbox.main(['prune'])
         self.assertIn('已清掉 0 題', out.getvalue())
 
+    def run_server_until_idle_exit(self, **settings):
+        import threading as th
+        config = dict({'host': '127.0.0.1', 'port': free_port(), 'token': 't', 'idle_hours': 0.0001}, **settings)
+        with mock.patch.object(inbox, 'IDLE_CHECK_SECONDS', 0.1), redirect_stdout(io.StringIO()) as out:
+            worker = th.Thread(target=inbox.serve, args=(config,), daemon=True)
+            worker.start()
+            worker.join(timeout=10)
+        self.assertFalse(worker.is_alive())
+        return out.getvalue()
+
+    def test_server_prunes_old_closed_questions_when_it_starts(self):
+        old = self.ask('--title', '很久以前收起的')
+        recent = self.ask('--title', '最近收起的')
+        self.close_at(old, 40)
+        self.close_at(recent, 3)
+        log = self.run_server_until_idle_exit(keep_days=30)
+        self.assertIn('自動清掉 1 題', log)
+        self.assertEqual({q['id'] for q in inbox.load_questions()}, {recent})
+
+    def test_keep_days_zero_or_unreadable_turns_auto_prune_off(self):
+        old = self.ask('--title', '很久以前收起的')
+        self.close_at(old, 40)
+        for off in (0, 'oops', None, -5):
+            self.assertEqual(inbox.keep_days_of({'keep_days': off}), 0)
+            self.assertNotIn('自動清掉', self.run_server_until_idle_exit(keep_days=off))
+            self.assertEqual(len(inbox.load_questions()), 1)  # 沒被刪
+        self.assertEqual(inbox.keep_days_of({}), 30)
+        self.assertEqual(inbox.keep_days_of({'keep_days': 7}), 7)
+
+    def test_manual_prune_uses_configured_days_unless_told_otherwise(self):
+        qid = self.ask('--title', '十天前收起的')
+        self.close_at(qid, 10)
+        (inbox.home() / 'config.json').write_text(json.dumps({'keep_days': 0}))  # 不自動清時，手動用預設 30 天
+        with redirect_stdout(io.StringIO()) as out:
+            inbox.main(['prune'])
+        self.assertIn('已清掉 0 題（收起超過 30 天的）', out.getvalue())
+        (inbox.home() / 'config.json').write_text(json.dumps({'keep_days': 7}))
+        with redirect_stdout(io.StringIO()) as out:
+            inbox.main(['prune'])
+        self.assertIn('已清掉 1 題（收起超過 7 天的）', out.getvalue())
+
     def test_events_can_still_be_appended_after_prune_rewrites_the_file(self):
         old = self.ask('--title', '舊題')
         self.close_at(old, 40)

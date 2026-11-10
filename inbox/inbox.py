@@ -27,6 +27,8 @@ DEFAULT_PORT = 7799
 MAX_BODY = 64 * 1024
 MAX_TEXT = 4000
 IDLE_CHECK_SECONDS = 60
+KEEP_DAYS = 30  # 收起的題目留幾天（config 的 keep_days 可改，0 是不自動清）
+PRUNE_EVERY_SECONDS = 24 * 3600
 TAILSCALE_NET = ipaddress.ip_network('100.64.0.0/10')  # Tailscale 的位址範圍，連線本身有加密
 TAKEOVER_HOURS = 24  # 出題的對話沒說自己結束、但這麼久沒動靜，就當它不在了（config 的 takeover_hours 可改）
 
@@ -42,7 +44,7 @@ def home():
 
 def read_config(path):
     config = {'host': '127.0.0.1', 'port': DEFAULT_PORT, 'token': '', 'idle_hours': 12,
-              'takeover_hours': TAKEOVER_HOURS}
+              'takeover_hours': TAKEOVER_HOURS, 'keep_days': KEEP_DAYS}
     if path.exists():
         config.update(json.loads(path.read_text(encoding='utf-8')))
     return config
@@ -383,6 +385,27 @@ def prune(days):
     return removed
 
 
+def keep_days_of(config):
+    """收起的題目留幾天。回 0 表示不自動清：設成 0，或設定值看不懂時（寧可不刪）。"""
+    try:
+        days = float(config.get('keep_days', KEEP_DAYS))
+    except (TypeError, ValueError):
+        return 0
+    return days if days > 0 else 0
+
+
+def auto_prune(days):
+    """服務啟動時清一次，之後每天清一次。"""
+    while True:
+        try:
+            removed = prune(days)
+            if removed:
+                print('自動清掉 %d 題（收起超過 %g 天的）' % (removed, days), flush=True)
+        except Exception:
+            pass  # 清不了不該影響服務，下一輪再試
+        time.sleep(PRUNE_EVERY_SECONDS)
+
+
 def validate_answers(payload, questions):
     answers = payload.get('answers') if isinstance(payload, dict) else None
     if not isinstance(answers, list) or not answers:
@@ -548,6 +571,9 @@ def serve(config):
         idle_seconds = 0  # 設定值看不懂就當成不自動結束
     if idle_seconds > 0:
         threading.Thread(target=watch_idle, args=(server, idle_seconds), daemon=True).start()
+    keep_days = keep_days_of(config)
+    if keep_days:
+        threading.Thread(target=auto_prune, args=(keep_days,), daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -685,9 +711,15 @@ def is_inbox_server(pid):
 
 
 def cmd_prune(args):
-    if args.days < 1:
+    days = args.days
+    if days is None:  # 沒指定就用設定的天數；設定是「不自動清」時，手動清用預設天數
+        try:
+            days = keep_days_of(read_config(home() / 'config.json')) or KEEP_DAYS
+        except (OSError, ValueError):
+            days = KEEP_DAYS
+    if days < 1:
         sys.exit('--days 至少是 1')
-    print('已清掉 %d 題（收起超過 %d 天的）' % (prune(args.days), args.days))
+    print('已清掉 %d 題（收起超過 %g 天的）' % (prune(days), days))
 
 
 def cmd_start(args):
@@ -745,7 +777,7 @@ def main(argv=None):
     p.add_argument('--all', action='store_true')
     p.set_defaults(func=cmd_list)
     p = sub.add_parser('prune', help='刪掉收起很久的題目，讓資料不會一直變大')
-    p.add_argument('--days', type=int, default=30, help='收起超過幾天才刪，預設 30')
+    p.add_argument('--days', type=int, help='收起超過幾天才刪，預設用 config 的 keep_days（30）')
     p.set_defaults(func=cmd_prune)
     sub.add_parser('hook', help='給 Claude Code hook 用').set_defaults(func=cmd_hook)
     sub.add_parser('serve', help='前景執行網頁服務').set_defaults(func=lambda a: serve(load_config()))
