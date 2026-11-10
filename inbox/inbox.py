@@ -323,22 +323,36 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(401, '需要 token')
         return True
 
-    def send_text(self, code, text, ctype='text/plain; charset=utf-8'):
+    def send_text(self, code, text, ctype='text/plain; charset=utf-8', extra=None):
         body = text.encode('utf-8')
         self.send_response(code)
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('Referrer-Policy', 'no-referrer')
+        for name, value in (extra or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
         return False
+
+    def send_page(self):
+        """送出頁面。CSP 只放行這一次回應帶 nonce 的那段 script，也不准頁面連到外面：
+        就算題目文字的跳脫哪天漏了，塞進來的 script 不會跑，資料也送不出去。"""
+        nonce = secrets.token_urlsafe(16)
+        html = PAGE.read_text(encoding='utf-8').replace('<script>', '<script nonce="%s">' % nonce, 1)
+        csp = "; ".join([
+            "default-src 'none'", "script-src 'nonce-%s'" % nonce, "style-src 'unsafe-inline'",
+            "connect-src 'self'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'"])
+        self.send_text(200, html, 'text/html; charset=utf-8',
+                       extra={'Content-Security-Policy': csp, 'X-Frame-Options': 'DENY'})
 
     def do_GET(self):
         path = self.path.split('?', 1)[0]
         if path == '/':
             if self.check(api=False):
-                self.send_text(200, PAGE.read_text(encoding='utf-8'), 'text/html; charset=utf-8')
+                self.send_page()
         elif path == '/api/state':
             if self.check(api=True):
                 self.send_text(200, json.dumps(build_state(), ensure_ascii=False),

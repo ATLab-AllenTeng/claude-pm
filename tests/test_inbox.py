@@ -283,6 +283,24 @@ class Server(Base):
         self.assertEqual(self.req(port, '/api/answer', {'answers': [{'question_id': qid, 'choice': 'A'}]},
                                   headers=good)[0], 200)  # 服務還活著
 
+    def test_page_is_served_with_csp_that_only_allows_its_own_script(self):
+        port = self.start()
+        seen = []
+        for _ in range(2):
+            with urllib.request.urlopen('http://127.0.0.1:%d/' % port, timeout=5) as resp:
+                csp = resp.headers['Content-Security-Policy']
+                html = resp.read().decode()
+                self.assertEqual(resp.headers['X-Frame-Options'], 'DENY')
+                self.assertEqual(resp.headers['Referrer-Policy'], 'no-referrer')
+            nonce = csp.split("script-src 'nonce-")[1].split("'")[0]
+            self.assertIn('<script nonce="%s">' % nonce, html)
+            self.assertNotIn('<script>', html)  # 頁面上沒有不帶 nonce 的 script
+            self.assertNotIn('unsafe-inline', csp.split('script-src')[1].split(';')[0])
+            self.assertIn("default-src 'none'", csp)
+            self.assertIn("connect-src 'self'", csp)
+            seen.append(nonce)
+        self.assertNotEqual(seen[0], seen[1])  # 每次回應換一個
+
     def test_token_required_when_configured(self):
         port = self.start(token='secret-token')
         self.assertEqual(self.req(port, '/api/state')[0], 401)
