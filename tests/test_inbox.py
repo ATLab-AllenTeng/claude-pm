@@ -709,16 +709,21 @@ class Server(Base):
 
     def test_stop_leaves_unrelated_process_alone_when_pid_file_is_stale(self):
         import subprocess
-        bystander = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
-        self.addCleanup(bystander.kill)
-        pid_file = inbox.home() / 'server.pid'
-        pid_file.write_text(str(bystander.pid))  # 舊 PID 檔，號碼已經是別的程式的
-        with redirect_stdout(io.StringIO()) as out:
-            inbox.main(['stop'])
-        self.assertIn('本來就沒在跑', out.getvalue())
-        time.sleep(0.2)
-        self.assertIsNone(bystander.poll())  # 沒被誤殺
-        self.assertFalse(pid_file.exists())
+        # 工作目錄放在暫存資料夾外面：Windows 上行程會佔住自己的工作目錄，收尾時會刪不掉
+        bystander = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+                                     cwd=tempfile.gettempdir())
+        try:
+            pid_file = inbox.home() / 'server.pid'
+            pid_file.write_text(str(bystander.pid))  # 舊 PID 檔，號碼已經是別的程式的
+            with redirect_stdout(io.StringIO()) as out:
+                inbox.main(['stop'])
+            self.assertIn('本來就沒在跑', out.getvalue())
+            time.sleep(0.2)
+            self.assertIsNone(bystander.poll())  # 沒被誤殺
+            self.assertFalse(pid_file.exists())
+        finally:
+            bystander.kill()
+            bystander.wait(timeout=10)
 
     def test_command_line_check_handles_quotes_spaces_and_missing_process(self):
         cases = {

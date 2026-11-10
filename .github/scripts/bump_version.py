@@ -25,7 +25,7 @@ def version_at(commit):
     if not commit or set(commit) == {'0'}:
         return None
     out = subprocess.run(['git', 'show', '%s:%s' % (commit, MANIFEST.as_posix())],
-                         capture_output=True, text=True)
+                         capture_output=True, encoding='utf-8', errors='replace')
     if out.returncode != 0:
         return None
     try:
@@ -49,6 +49,9 @@ def report(bumped, version):
 
 
 def main(argv):
+    for stream in (sys.stdout, sys.stderr):  # 訊息是中文：別讓非 UTF-8 的主控台把指令弄掛
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8', errors='replace')
     before = argv[1] if len(argv) > 1 else ''
     text = MANIFEST.read_text(encoding='utf-8')
     current = json.loads(text).get('version')

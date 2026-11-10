@@ -24,13 +24,13 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python: ['3.12']
         include:
-          - os: ubuntu-latest
-            python: '3.9'    # 宣稱支援的最低版本
+          - os: ubuntu-24.04   # ubuntu-latest 已經沒有 3.9 可以裝
+            python: '3.9'      # 宣稱支援的最低版本
           - os: windows-latest
             python: '3.9'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       - name: 跑測試

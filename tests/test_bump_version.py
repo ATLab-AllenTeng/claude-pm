@@ -23,7 +23,7 @@ class BumpVersion(unittest.TestCase):
     def git(self, *args):
         out = subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@example.invalid',
                               '-c', 'commit.gpgsign=false', *args],
-                             cwd=self.repo, capture_output=True, text=True, check=True)
+                             cwd=self.repo, capture_output=True, encoding='utf-8', errors='replace', check=True)
         return out.stdout.strip()
 
     def commit_manifest(self, version=None, raw=None):
@@ -38,17 +38,17 @@ class BumpVersion(unittest.TestCase):
 
     def run_script(self, before):
         output = self.repo / 'github-output.txt'
-        output.write_text('')
+        output.write_text('', encoding='utf-8')
         env = dict(os.environ, GITHUB_OUTPUT=str(output))
         done = subprocess.run([sys.executable, str(SCRIPT), before], cwd=self.repo, env=env,
-                              capture_output=True, text=True)
-        return done, dict(line.split('=', 1) for line in output.read_text().splitlines())
+                              capture_output=True, encoding='utf-8', errors='replace')
+        return done, dict(line.split('=', 1) for line in output.read_text(encoding='utf-8').splitlines())
 
     def version(self):
         return json.loads(self.manifest.read_text(encoding='utf-8')).get('version')
 
     def test_merge_without_version_change_gets_next_patch(self):
-        (self.repo / 'README.md').write_text('改了別的檔')
+        (self.repo / 'README.md').write_text('改了別的檔', encoding='utf-8')
         self.commit('合進一個沒改版號的 PR')
         done, out = self.run_script(self.first)
         self.assertEqual(done.returncode, 0)
