@@ -140,6 +140,25 @@ class Delivery(Base):
         with mock.patch.object(inbox.time, 'time', return_value=later):
             self.assertEqual(len(inbox.take('sess-2', str(self.project))), 1)
 
+    def test_asker_that_is_still_around_keeps_its_answer_past_30_minutes(self):
+        qid = self.ask('--title', 't', '--option', 'A=甲')
+        event = self.answer(qid)
+        later = datetime.fromisoformat(event['at']).timestamp() + inbox.ORPHAN_SECONDS + 1
+        with mock.patch.object(inbox.time, 'time', return_value=later - 60):
+            inbox.touch_session('sess-1')  # 出題的對話一分鐘前還在（例如正在 inbox wait）
+        with mock.patch.object(inbox.time, 'time', return_value=later):
+            self.assertEqual(inbox.take('sess-2', str(self.project)), [])  # 別的對話接不走
+            self.assertEqual(len(inbox.take('sess-1', str(self.project))), 1)
+
+    def test_session_seen_file_is_private_and_missing_one_counts_as_gone(self):
+        self.assertEqual(inbox.last_seen('never-seen'), 0.0)
+        inbox.touch_session('')  # 沒有 session 代號時什麼都不記
+        inbox.touch_session('sess-9')
+        folder = Path(os.environ['CLAUDE_INBOX_HOME']) / 'sessions'
+        self.assertEqual(len(list(folder.iterdir())), 1)
+        self.assertEqual(oct(folder.stat().st_mode & 0o777), '0o700')
+        self.assertGreater(inbox.last_seen('sess-9'), 0)
+
     def test_hook_reads_stdin_and_prints_answers(self):
         qid = self.ask('--title', '問題標題', '--option', 'A=甲')
         self.answer(qid)

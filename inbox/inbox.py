@@ -5,6 +5,7 @@
 """
 import argparse
 import fcntl
+import hashlib
 import ipaddress
 import json
 import os
@@ -24,7 +25,7 @@ PAGE = HERE / 'page.html'
 DEFAULT_PORT = 7799
 MAX_BODY = 64 * 1024
 MAX_TEXT = 4000
-ORPHAN_SECONDS = 30 * 60  # 提問的 session 30 分鐘沒來拿，同專案其他 session 可以拿
+ORPHAN_SECONDS = 30 * 60  # 回答放了 30 分鐘、出題的 session 也 30 分鐘沒動靜，同專案其他 session 才可以拿
 
 
 # ---------- 路徑與設定 ----------
@@ -94,6 +95,34 @@ def base_url(config):
 
 def page_url(config):
     return base_url(config) + ('?t=' + config['token'] if config.get('token') else '')
+
+
+# ---------- session 的動靜 ----------
+
+def session_file(session_id):
+    folder = home() / 'sessions'
+    folder.mkdir(mode=0o700, exist_ok=True)
+    return folder / hashlib.sha256(session_id.encode('utf-8')).hexdigest()[:32]
+
+
+def touch_session(session_id):
+    """記下這個 session 剛剛還在：出題、來拿回答、在 wait 裡等，都算。"""
+    if not session_id:
+        return
+    now = time.time()
+    try:
+        path = session_file(session_id)
+        path.touch(mode=0o600)
+        os.utime(path, (now, now))
+    except OSError:
+        pass  # 記不下來不該擋住出題或拿回答
+
+
+def last_seen(session_id):
+    try:
+        return session_file(session_id).stat().st_mtime
+    except OSError:
+        return 0.0  # 沒記錄過（例如舊版出的題）就當它不在了
 
 
 # ---------- 題目與事件 ----------
@@ -181,11 +210,13 @@ def deliverable(session_id, cwd, events=None):
         own = bool(asker) and asker == session_id  # 出題的就是這個 session：不管現在在哪個資料夾
         if not own and q.get('project') != project:
             continue
+        # 出題的 session 還有動靜（剛出題、剛來拿過、正在 wait）就不讓別人接手
+        asker_gone = not asker or now - last_seen(asker) > ORPHAN_SECONDS
         for a in q['answers']:
             if a['delivered']:
                 continue
             age = now - datetime.fromisoformat(a['at']).timestamp()
-            if own or not asker or age > ORPHAN_SECONDS:
+            if own or not asker or (age > ORPHAN_SECONDS and asker_gone):
                 out.append((q, a))
     return out
 
@@ -218,6 +249,7 @@ def take(session_id, cwd, emit=None):
     有給 emit 時，先把回答交出去、成功了才寫「已送達」。中途被砍掉（例如 hook 逾時）
     的話這則會留到下次再送：寧可重送一次，也不要網頁顯示已收到、agent 卻沒拿到。
     """
+    touch_session(session_id)
     with EventLog() as log:
         pairs = deliverable(session_id, cwd, log.read())
         if pairs and emit:
@@ -381,6 +413,7 @@ def cmd_ask(args):
          'project': project_of(os.getcwd()), 'session': os.environ.get('CLAUDE_CODE_SESSION_ID', ''),
          'created': now_iso()}
     write_json(home() / 'questions' / (q['id'] + '.json'), q)
+    touch_session(q['session'])
     config = load_config()
     up = ensure_server(config)
     print('已放進收件匣：%s' % q['id'])
@@ -407,6 +440,7 @@ def cmd_wait(args):
     deadline = time.time() + args.timeout
     session = os.environ.get('CLAUDE_CODE_SESSION_ID', '')
     while time.time() < deadline:
+        touch_session(session)  # 還在等：別讓同專案的其他對話把回答接走
         if deliverable(session, os.getcwd()) and take(session, os.getcwd(), emit=emit_answers):
             return
         time.sleep(3)
