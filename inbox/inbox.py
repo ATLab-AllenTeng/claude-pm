@@ -837,7 +837,7 @@ def command_line_of(pid):
                              encoding='utf-8', errors='replace')
     except (OSError, subprocess.SubprocessError):
         return ''
-    return out.stdout if out.returncode == 0 else ''
+    return out.stdout.strip() if out.returncode == 0 else ''
 
 
 def cmd_prune(args):

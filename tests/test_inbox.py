@@ -47,7 +47,27 @@ class Base(unittest.TestCase):
         self.no_server.stop()
         os.chdir(self.cwd)
         self.env.stop()
-        self.tmp.cleanup()
+        # Windows：剛被停掉的背景服務要過一下才放開 server.log，資料夾這時還刪不掉
+        for left in range(119, -1, -1):
+            try:
+                self.tmp.cleanup()
+                break
+            except OSError:
+                if not left:
+                    raise
+                time.sleep(0.025)
+
+    def assertMode(self, path, mode):
+        # Windows 沒有 POSIX 權限位元（st_mode 一律是 0o666／0o777），保護靠使用者資料夾的存取控制
+        if os.name != 'nt':
+            self.assertEqual(oct(Path(path).stat().st_mode & 0o777), mode)
+
+    @staticmethod
+    def kill_quietly(pid):
+        try:
+            os.kill(int(pid), 15)
+        except (OSError, ValueError):  # 已經不在了：POSIX 是 ProcessLookupError，Windows 是一般的 OSError
+            pass
 
     def ask(self, *argv):
         with redirect_stdout(io.StringIO()) as out:
@@ -224,7 +244,7 @@ class Delivery(Base):
         inbox.touch_session('sess-9')
         folder = Path(os.environ['CLAUDE_INBOX_HOME']) / 'sessions'
         self.assertEqual(len(list(folder.iterdir())), 1)
-        self.assertEqual(oct(folder.stat().st_mode & 0o777), '0o700')
+        self.assertMode(folder, '0o700')
         self.assertGreater(inbox.last_seen('sess-9'), 0)
 
     def test_hook_reads_stdin_and_prints_answers(self):
@@ -509,7 +529,7 @@ class Prune(Base):
         qid = self.ask('--title', '新題', '--option', 'A=甲')
         self.answer(qid)
         self.assertEqual(len(inbox.take('sess-1', str(self.project))), 1)
-        self.assertEqual(oct(inbox.events_path().stat().st_mode & 0o777), '0o600')
+        self.assertMode(inbox.events_path(), '0o600')
 
 
 class Server(Base):
@@ -665,19 +685,16 @@ class Server(Base):
         try:
             with mock.patch.object(inbox, 'ensure_server', REAL_ENSURE_SERVER):
                 self.assertTrue(inbox.ensure_server(config))
-            log = (Path(os.environ['CLAUDE_INBOX_HOME']) / 'server.log').read_text()
+            log = (Path(os.environ['CLAUDE_INBOX_HOME']) / 'server.log').read_text(encoding='utf-8')
             self.assertIn('收件匣服務已啟動', log)
             self.assertNotIn(config['token'], log)
         finally:  # 必須在測試本體清：tearDown 會先刪掉暫存資料夾與 PID 檔
             if pid_file.exists():
-                try:
-                    os.kill(int(pid_file.read_text()), signal.SIGTERM)
-                except (ProcessLookupError, ValueError):
-                    pass
+                self.kill_quietly(pid_file.read_text())
 
     def test_stop_leaves_unrelated_process_alone_when_pid_file_is_stale(self):
         import subprocess
-        bystander = subprocess.Popen(['sleep', '30'])
+        bystander = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
         self.addCleanup(bystander.kill)
         pid_file = inbox.home() / 'server.pid'
         pid_file.write_text(str(bystander.pid))  # 舊 PID 檔，號碼已經是別的程式的
@@ -722,10 +739,7 @@ class Server(Base):
                 time.sleep(0.2)
             self.assertFalse(inbox.server_alive(config))
         finally:
-            try:
-                os.kill(pid, 15)
-            except ProcessLookupError:
-                pass
+            self.kill_quietly(pid)
 
     def test_idle_rule_needs_no_waiting_question_and_a_long_quiet_period(self):
         hour = 3600
@@ -756,13 +770,13 @@ class Server(Base):
         config = inbox.load_config()
         path = Path(os.environ['CLAUDE_INBOX_HOME']) / 'config.json'
         self.assertTrue(config['token'])
-        self.assertEqual(oct(path.stat().st_mode & 0o777), '0o600')
-        self.assertEqual(oct(path.parent.stat().st_mode & 0o777), '0o700')
+        self.assertMode(path, '0o600')
+        self.assertMode(path.parent, '0o700')
         self.assertEqual(inbox.load_config()['token'], config['token'])  # 第二次不重產
         qid = self.ask('--title', 't')
         self.answer(qid, choice='', text='x')
-        self.assertEqual(oct(inbox.events_path().stat().st_mode & 0o777), '0o600')
-        self.assertEqual(oct((path.parent / 'questions').stat().st_mode & 0o777), '0o700')
+        self.assertMode(inbox.events_path(), '0o600')
+        self.assertMode((path.parent / 'questions'), '0o700')
 
     def test_plain_http_warning_only_outside_loopback_and_tailscale(self):
         from contextlib import redirect_stderr
@@ -789,7 +803,7 @@ class Server(Base):
         path.write_text(json.dumps({'host': '100.64.0.1'}))
         config = inbox.load_config()
         self.assertTrue(config['token'])
-        self.assertEqual(oct(path.stat().st_mode & 0o777), '0o600')
+        self.assertMode(path, '0o600')
         self.assertIn('?t=' + config['token'], inbox.page_url(config))
 
 
