@@ -151,6 +151,31 @@ class Delivery(Base):
             inbox.main(['hook'])
         self.assertEqual(out.getvalue(), '')  # 沒有新回覆時什麼都不印
 
+    def test_answer_is_not_marked_delivered_when_output_fails(self):
+        qid = self.ask('--title', 't', '--option', 'A=甲')
+        self.answer(qid)
+
+        def broken(pairs):
+            raise BrokenPipeError('讀的那一端不見了')
+
+        with self.assertRaises(BrokenPipeError):
+            inbox.take('sess-1', str(self.project), emit=broken)
+        self.assertFalse(inbox.build_state()['questions'][0]['answers'][0]['delivered'])
+        seen = []
+        self.assertEqual(len(inbox.take('sess-1', str(self.project), emit=seen.extend)), 1)  # 下次還拿得到
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(inbox.build_state()['questions'][0]['answers'][0]['delivered'])
+
+    def test_take_command_prints_answers_then_reports_none(self):
+        qid = self.ask('--title', '問題標題', '--option', 'A=甲')
+        self.answer(qid)
+        with redirect_stdout(io.StringIO()) as out:
+            inbox.main(['take'])
+        self.assertIn('問題標題', out.getvalue())
+        with redirect_stdout(io.StringIO()) as out:
+            inbox.main(['take'])
+        self.assertIn('沒有新的回覆', out.getvalue())
+
     def test_close_hides_question_from_list(self):
         qid = self.ask('--title', '要收的題')
         with redirect_stdout(io.StringIO()):

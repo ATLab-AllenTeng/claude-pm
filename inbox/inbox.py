@@ -206,10 +206,22 @@ def format_answers(pairs):
     return '\n'.join(lines)
 
 
-def take(session_id, cwd):
-    """取出回答並標成已送達；同一把鎖裡做，兩個 session 不會拿到同一則。"""
+def emit_answers(pairs):
+    """把回答印到 stdout 並確實送出；印不出去會丟例外，呼叫端就不會把它標成已送達。"""
+    sys.stdout.write(format_answers(pairs) + '\n')
+    sys.stdout.flush()
+
+
+def take(session_id, cwd, emit=None):
+    """取出回答並標成已送達；同一把鎖裡做，兩個 session 不會拿到同一則。
+
+    有給 emit 時，先把回答交出去、成功了才寫「已送達」。中途被砍掉（例如 hook 逾時）
+    的話這則會留到下次再送：寧可重送一次，也不要網頁顯示已收到、agent 卻沒拿到。
+    """
     with EventLog() as log:
         pairs = deliverable(session_id, cwd, log.read())
+        if pairs and emit:
+            emit(pairs)
         log.append([{'event_id': str(uuid.uuid4()), 'kind': 'delivered', 'ref': a['event_id'],
                      'session': session_id, 'at': now_iso()} for _, a in pairs])
     return pairs
@@ -387,19 +399,16 @@ def cmd_close(args):
 
 
 def cmd_take(args):
-    pairs = take(os.environ.get('CLAUDE_CODE_SESSION_ID', ''), os.getcwd())
-    print(format_answers(pairs) if pairs else '收件匣：沒有新的回覆。')
+    if not take(os.environ.get('CLAUDE_CODE_SESSION_ID', ''), os.getcwd(), emit=emit_answers):
+        print('收件匣：沒有新的回覆。')
 
 
 def cmd_wait(args):
     deadline = time.time() + args.timeout
     session = os.environ.get('CLAUDE_CODE_SESSION_ID', '')
     while time.time() < deadline:
-        if deliverable(session, os.getcwd()):
-            pairs = take(session, os.getcwd())
-            if pairs:
-                print(format_answers(pairs))
-                return
+        if deliverable(session, os.getcwd()) and take(session, os.getcwd(), emit=emit_answers):
+            return
         time.sleep(3)
     print('收件匣：等了 %d 秒沒有新回覆。' % args.timeout)
     sys.exit(2)
@@ -411,9 +420,7 @@ def cmd_hook(args):
         data = json.loads(sys.stdin.read() or '{}')
     except ValueError:
         data = {}
-    pairs = take(data.get('session_id', ''), data.get('cwd') or os.getcwd())
-    if pairs:
-        print(format_answers(pairs))
+    take(data.get('session_id', ''), data.get('cwd') or os.getcwd(), emit=emit_answers)
 
 
 def cmd_list(args):
