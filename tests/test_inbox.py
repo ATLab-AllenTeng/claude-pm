@@ -692,6 +692,15 @@ class Server(Base):
             if pid_file.exists():
                 self.kill_quietly(pid_file.read_text())
 
+    def test_background_server_does_not_sit_in_the_project_folder(self):
+        with mock.patch.object(inbox.subprocess, 'Popen') as popen, \
+                mock.patch.object(inbox, 'server_alive', side_effect=[False, True]), \
+                mock.patch.object(inbox, 'ensure_server', REAL_ENSURE_SERVER):
+            self.assertTrue(inbox.ensure_server({'host': '127.0.0.1', 'port': 1, 'token': 't'}))
+        where = popen.call_args.kwargs['cwd']
+        self.assertEqual(os.path.realpath(where), os.path.realpath(str(inbox.home())))
+        self.assertNotEqual(os.path.realpath(where), os.path.realpath(os.getcwd()))  # 不是出題當下的專案
+
     def test_stop_leaves_unrelated_process_alone_when_pid_file_is_stale(self):
         import subprocess
         bystander = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])

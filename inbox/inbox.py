@@ -715,16 +715,19 @@ def ensure_server(config):
     if server_alive(config):
         return True
     command = [sys.executable, str(Path(__file__).resolve()), 'serve']
+    # 工作目錄放在資料夾裡，不要留在出題當下的專案：Windows 上行程的工作目錄會被佔住，
+    # 服務活著的期間那個專案資料夾刪不掉也改不了名。
+    where = str(home())
     # 子行程拿到自己的那份 handle；這邊用完就關，否則 Windows 上 server.log 會一直被佔著、刪不掉
     with open(home() / 'server.log', 'a', encoding='utf-8') as log:
         if IS_WINDOWS:
             # 脫離目前的主控台：不跳視窗，hook 或終端機結束時也不會被一起帶走
             flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
                      | subprocess.CREATE_NO_WINDOW)
-            subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+            subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=log, cwd=where,
                              creationflags=flags, close_fds=True)
         else:
-            subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+            subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=log, cwd=where,
                              start_new_session=True)
     for _ in range(20):
         time.sleep(0.2)
