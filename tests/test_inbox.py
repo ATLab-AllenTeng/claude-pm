@@ -282,6 +282,46 @@ class Delivery(Base):
         self.assertTrue(inbox.build_state()['questions'][0]['closed'])
 
 
+class EntryPoints(Base):
+    ROOT = Path(inbox.__file__).resolve().parent.parent
+
+    def run_entry(self, command, stdin=b''):
+        import subprocess
+        return subprocess.run(command, input=stdin, capture_output=True, cwd=str(self.project), timeout=120)
+
+    def test_hooks_all_go_through_the_sh_entry_point(self):
+        hooks = json.loads((self.ROOT / 'hooks' / 'hooks.json').read_text(encoding='utf-8'))['hooks']
+        self.assertEqual(sorted(hooks), ['SessionEnd', 'SessionStart', 'UserPromptSubmit'])
+        for event, groups in hooks.items():
+            command = groups[0]['hooks'][0]['command']
+            self.assertEqual(command, 'sh "${CLAUDE_PLUGIN_ROOT}/bin/inbox" hook', event)
+        self.assertNotIn(b'\r', (self.ROOT / 'bin' / 'inbox').read_bytes())  # sh 腳本不能有 CRLF
+
+    def test_sh_entry_point_runs_commands_and_hook(self):
+        import shutil
+        sh = shutil.which('sh')
+        if not sh:
+            self.skipTest('這台機器沒有 sh（Windows 上沒裝 Git for Windows）')
+        qid = self.ask('--title', '問題標題', '--option', 'A=甲')
+        self.answer(qid)
+        entry = str(self.ROOT / 'bin' / 'inbox')
+        listed = self.run_entry([sh, entry, 'list'])
+        self.assertEqual(listed.returncode, 0, listed.stderr.decode('utf-8', 'replace'))
+        self.assertIn('問題標題', listed.stdout.decode('utf-8'))
+        payload = json.dumps({'hook_event_name': 'UserPromptSubmit', 'session_id': 'sess-1',
+                              'cwd': str(self.project)}).encode('utf-8')
+        hooked = self.run_entry([sh, entry, 'hook'], stdin=payload)
+        self.assertEqual(hooked.returncode, 0, hooked.stderr.decode('utf-8', 'replace'))
+        self.assertIn('使用者選：A 甲', hooked.stdout.decode('utf-8'))
+
+    @unittest.skipUnless(os.name == 'nt', '只有 Windows 有 cmd')
+    def test_cmd_entry_point_runs_on_windows(self):
+        self.ask('--title', '問題標題')
+        listed = self.run_entry(['cmd', '/c', str(self.ROOT / 'bin' / 'inbox.cmd'), 'list'])
+        self.assertEqual(listed.returncode, 0, listed.stderr.decode('utf-8', 'replace'))
+        self.assertIn('問題標題', listed.stdout.decode('utf-8'))
+
+
 class Files(Base):
     def test_replace_retries_only_on_windows_and_cleans_up_when_it_gives_up(self):
         target = inbox.home() / 'config.json'
