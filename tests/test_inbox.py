@@ -262,6 +262,27 @@ class Server(Base):
         self.assertEqual(code, 400)
         self.assertIn('已經收起來', body)
 
+    def test_malformed_requests_get_an_error_response_instead_of_a_dropped_connection(self):
+        import http.client
+        qid = self.ask('--title', 't', '--option', 'A=甲')
+        port = self.start(token='secret-token')
+        good = {'X-Inbox-Token': 'secret-token'}
+        self.assertEqual(self.req(port, '/api/state', headers={'X-Inbox-Token': 'tök\u00e9n'})[0], 401)
+        for bad_id in (['x'], {'a': 1}, 5, None):
+            code, _ = self.req(port, '/api/answer', {'answers': [{'question_id': bad_id, 'choice': 'A'}]}, headers=good)
+            self.assertEqual(code, 400)
+        conn = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+        self.addCleanup(conn.close)
+        conn.putrequest('POST', '/api/answer')
+        conn.putheader('X-Inbox-Token', 'secret-token')
+        conn.putheader('Content-Type', 'application/json')
+        conn.putheader('Content-Length', 'abc')
+        conn.endheaders()
+        self.assertEqual(conn.getresponse().status, 400)
+        self.assertEqual(inbox.read_events(), [])
+        self.assertEqual(self.req(port, '/api/answer', {'answers': [{'question_id': qid, 'choice': 'A'}]},
+                                  headers=good)[0], 200)  # 服務還活著
+
     def test_token_required_when_configured(self):
         port = self.start(token='secret-token')
         self.assertEqual(self.req(port, '/api/state')[0], 401)

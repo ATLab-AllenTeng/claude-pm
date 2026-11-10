@@ -266,7 +266,8 @@ def validate_answers(payload, questions):
     events = []
     seen = set()
     for item in answers:
-        q = questions.get(item.get('question_id')) if isinstance(item, dict) else None
+        qid = item.get('question_id') if isinstance(item, dict) else None
+        q = questions.get(qid) if isinstance(qid, str) else None
         if not q:
             raise ValueError('找不到題目')
         if q.get('closed'):
@@ -316,7 +317,9 @@ class Handler(BaseHTTPRequestHandler):
         if origin and origin != 'http://' + host:
             return self.send_text(403, 'Origin 不符')
         token = self.config.get('token')
-        if api and token and not secrets.compare_digest(self.headers.get('X-Inbox-Token', ''), token):
+        given = self.headers.get('X-Inbox-Token', '')
+        # 轉成 bytes 再比：compare_digest 遇到非 ASCII 的字串會丟例外
+        if api and token and not secrets.compare_digest(given.encode('utf-8'), token.encode('utf-8')):
             return self.send_text(401, '需要 token')
         return True
 
@@ -350,7 +353,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not self.headers.get('Content-Type', '').startswith('application/json'):
             return self.send_text(415, '只收 JSON')
-        length = int(self.headers.get('Content-Length') or 0)
+        try:
+            length = int(self.headers.get('Content-Length') or 0)
+        except ValueError:
+            return self.send_text(400, 'Content-Length 不是數字')
         if length <= 0 or length > MAX_BODY:
             return self.send_text(413, '內容太大或是空的')
         try:
