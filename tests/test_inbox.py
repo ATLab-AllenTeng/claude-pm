@@ -195,6 +195,15 @@ class Delivery(Base):
             inbox.main(['take'])
         self.assertIn('沒有新的回覆', out.getvalue())
 
+    def test_wait_asks_git_for_the_project_only_once(self):
+        qid = self.ask('--title', 't', '--option', 'A=甲')
+        self.answer(qid)
+        with mock.patch.object(inbox, 'project_of', wraps=inbox.project_of) as spy, \
+                redirect_stdout(io.StringIO()) as out:
+            inbox.main(['wait', '--timeout', '5'])
+        self.assertEqual(spy.call_count, 1)
+        self.assertIn('使用者選：A 甲', out.getvalue())
+
     def test_close_hides_question_from_list(self):
         qid = self.ask('--title', '要收的題')
         with redirect_stdout(io.StringIO()):

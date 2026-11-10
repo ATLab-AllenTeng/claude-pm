@@ -200,9 +200,9 @@ def build_state(events=None):
     return {'questions': items}
 
 
-def deliverable(session_id, cwd, events=None):
-    """這個 session 該拿到、還沒拿過的回答。"""
-    project = project_of(cwd)
+def deliverable(session_id, cwd, events=None, project=None):
+    """這個 session 該拿到、還沒拿過的回答。project 可以先算好傳進來，省掉每次問 git。"""
+    project = project or project_of(cwd)
     now = time.time()
     out = []
     for q in build_state(events)['questions']:
@@ -243,7 +243,7 @@ def emit_answers(pairs):
     sys.stdout.flush()
 
 
-def take(session_id, cwd, emit=None):
+def take(session_id, cwd, emit=None, project=None):
     """取出回答並標成已送達；同一把鎖裡做，兩個 session 不會拿到同一則。
 
     有給 emit 時，先把回答交出去、成功了才寫「已送達」。中途被砍掉（例如 hook 逾時）
@@ -251,7 +251,7 @@ def take(session_id, cwd, emit=None):
     """
     touch_session(session_id)
     with EventLog() as log:
-        pairs = deliverable(session_id, cwd, log.read())
+        pairs = deliverable(session_id, cwd, log.read(), project)
         if pairs and emit:
             emit(pairs)
         log.append([{'event_id': str(uuid.uuid4()), 'kind': 'delivered', 'ref': a['event_id'],
@@ -481,9 +481,11 @@ def cmd_take(args):
 def cmd_wait(args):
     deadline = time.time() + args.timeout
     session = os.environ.get('CLAUDE_CODE_SESSION_ID', '')
+    cwd = os.getcwd()
+    project = project_of(cwd)  # 只問 git 一次，不要每 3 秒起一個行程
     while time.time() < deadline:
         touch_session(session)  # 還在等：別讓同專案的其他對話把回答接走
-        if deliverable(session, os.getcwd()) and take(session, os.getcwd(), emit=emit_answers):
+        if deliverable(session, cwd, project=project) and take(session, cwd, emit=emit_answers, project=project):
             return
         time.sleep(3)
     print('收件匣：等了 %d 秒沒有新回覆。' % args.timeout)
